@@ -39,6 +39,8 @@
 #include <glog/logging.h>
 #include <spark_dsg/printing.h>
 
+#include <filesystem>
+
 #include "hydra/backend/backend_utilities.h"
 #include "hydra/utils/mesh_utilities.h"
 #include "hydra/utils/timing_utilities.h"
@@ -70,10 +72,59 @@ NodeAttributes::Ptr mergeObjectAttributes(const VerbosityConfig& config,
   auto attrs_ptr = graph.getNode(*iter).attributes().clone();
   auto& new_attrs =
       *CHECK_NOTNULL(dynamic_cast<ObjectNodeAttributes*>(attrs_ptr.get()));
+
+  // Cast to KhronosObjectAttributes to access image_folder
+  auto* new_khronos_attrs = dynamic_cast<KhronosObjectAttributes*>(&new_attrs);
+
   ++iter;
   while (iter != nodes.end()) {
     const auto& from_attrs = graph.getNode(*iter).attributes<ObjectNodeAttributes>();
     utils::mergeIndices(from_attrs.mesh_connections, new_attrs.mesh_connections);
+
+    // Merge images logic
+    if (new_khronos_attrs) {
+      const auto* from_khronos_attrs =
+          dynamic_cast<const KhronosObjectAttributes*>(&from_attrs);
+
+      if (from_khronos_attrs && !from_khronos_attrs->image_folder.empty()) {
+        if (new_khronos_attrs->image_folder.empty()) {
+          // If target has no folder, adopt the source's folder.
+          new_khronos_attrs->image_folder = from_khronos_attrs->image_folder;
+        } else {
+          // Move files from source (which is being merged/deleted) to target
+          // (new_attrs). Both paths might be absolute or relative (relative to
+          // ADT4_OUTPUT_DIR). We assume they are valid paths.
+          std::filesystem::path src_path(from_khronos_attrs->image_folder);
+          std::filesystem::path dest_path(new_khronos_attrs->image_folder);
+
+          // If paths are same, nothing to do.
+          if (src_path != dest_path && std::filesystem::exists(src_path)) {
+            try {
+              if (!std::filesystem::exists(dest_path)) {
+                std::filesystem::create_directories(dest_path);
+              }
+
+              // Iterate and move
+              for (const auto& entry : std::filesystem::directory_iterator(src_path)) {
+                std::filesystem::path src_file = entry.path();
+                std::filesystem::path dest_file = dest_path / src_file.filename();
+                // Merge: overwrite or keep?
+                // Khronos frames have unique timestamps usually, so overwrite/move
+                // should be fine. If conflict, we might want to keep the one already
+                // there, or overwrite. Let's overwrite/rename.
+                std::filesystem::rename(src_file, dest_file);
+              }
+              // Source should modify its image folder? No, source is being merged away.
+              // We should delete the old folder.
+              std::filesystem::remove_all(src_path);
+            } catch (const std::exception& e) {
+              LOG(WARNING) << "Failed to merge image folders: " << e.what();
+            }
+          }
+        }
+      }
+    }
+
     ++iter;
   }
 
@@ -142,29 +193,151 @@ void UpdateObjectsFunctor::call(const DynamicSceneGraph& unmerged,
   size_t num_changed = 0;
   // we want to use the optimized mesh (unmerged doesn't have a mesh)
   const auto mesh = dsg.graph->mesh();
-  for (const auto& node : view) {
+
+  // Iterate over ALL nodes to ensure folder consistency, not just active ones.
+  // The overhead is minimal compared to the IO operations if we check existence first.
+  // TODO(harel): Optimally we should only do this for new/changed nodes, but tracking
+  // 'changed folder' is hard.
+  for (const auto& id_node_pair : objects.nodes()) {
+    const auto& node = *id_node_pair.second;
     ++num_changed;
     auto attrs = node.tryAttributes<ObjectNodeAttributes>();
     if (!attrs) {
       continue;  // not an object
     }
 
+    // Clone attributes first so we can modify them for the backend
+    auto new_attrs_ptr = attrs->clone();
+    auto* new_attrs = dynamic_cast<ObjectNodeAttributes*>(new_attrs_ptr.get());
+    if (!new_attrs) {
+      LOG(ERROR) << "Failed to cast cloned attributes to ObjectNodeAttributes";
+      continue;
+    }
+
+    // Check for image folder update (Move from temp -> final)
+    if (auto* khronos_attrs = dynamic_cast<KhronosObjectAttributes*>(new_attrs)) {
+      if (!khronos_attrs->image_folder.empty()) {
+        std::filesystem::path current_path(khronos_attrs->image_folder);
+
+        NodeSymbol sym(node.id);
+        std::string new_dir_name =
+            std::string(1, sym.category()) + "_" + std::to_string(sym.categoryId());
+        // Expected final relative path
+        std::string expected_relative = "images/" + new_dir_name;
+
+        // Check if we are currently in "temp"
+        bool is_in_temp = current_path.string().find("/temp/") != std::string::npos ||
+                          current_path.string().find("temp/") !=
+                              std::string::npos;  // simplistic check
+
+        // If path is not the expected final one
+        if (khronos_attrs->image_folder != expected_relative) {
+          std::filesystem::path parent;
+          // We need to find the "root" images directory.
+          // If current path is absolute, we can try to deduce it.
+          if (current_path.is_absolute()) {
+            if (is_in_temp) {
+              // Structure: .../images/temp/O_track
+              // We want:   .../images/O_node
+              parent = current_path.parent_path().parent_path();
+            } else {
+              // Structure: .../images/O_track (legacy/fallback)
+              parent = current_path.parent_path();
+            }
+
+            std::filesystem::path new_path = parent / new_dir_name;
+
+            bool source_exists = std::filesystem::exists(current_path);
+
+            if (source_exists) {
+              try {
+                if (!std::filesystem::exists(new_path)) {
+                  std::filesystem::create_directories(new_path);
+                }
+
+                // Move contents
+                for (const auto& entry :
+                     std::filesystem::directory_iterator(current_path)) {
+                  std::filesystem::path src_file = entry.path();
+                  std::filesystem::path dest_file = new_path / src_file.filename();
+                  // Overwrite/Rename
+                  std::filesystem::rename(src_file, dest_file);
+                }
+
+                // Remove source folder
+                std::filesystem::remove_all(current_path);
+
+              } catch (const std::exception& e) {
+                LOG(WARNING) << "Failed to move object images from " << current_path
+                             << " to " << new_path << ": " << e.what();
+              }
+            }
+          }
+
+          // Update attribute to standard relative path
+          khronos_attrs->image_folder = expected_relative;
+        }
+      }
+    }
+
     MLOG(5) << "processing object " << NodeSymbol(node.id).str()
             << " with attributes:\n"
-            << *attrs;
-    if (attrs->mesh_connections.empty()) {
+            << *new_attrs;
+    if (new_attrs->mesh_connections.empty()) {
       MLOG(2) << "found empty object node " << NodeSymbol(node.id).str();
       continue;
     }
 
-    if (!updateObjectGeometry(*mesh, *attrs)) {
+    if (!updateObjectGeometry(*mesh, *new_attrs)) {
       MLOG(2) << "invalid centroid for object " << NodeSymbol(node.id).str();
     }
 
     // TODO(nathan) this is sloppy and needs to be cleaned up
-    dsg.graph->setNodeAttributes(node.id, attrs->clone());
+    dsg.graph->setNodeAttributes(node.id, std::move(new_attrs_ptr));
   }
 
+  // Garbage Collection for Orphaned Folders is risky if we are mid-move or if temp is
+  // used. We should NOT touch 'temp' folder. We should ONLY clean 'images/O_X' where
+  // 'O_X' is invalid.
+  const char* output_dir_env = std::getenv("ADT4_OUTPUT_DIR");
+  if (output_dir_env) {
+    std::filesystem::path images_root =
+        std::filesystem::path(output_dir_env) / "images";
+    if (std::filesystem::exists(images_root)) {
+      // Build set of valid directory names from the BACKEND graph (dsg.graph)
+      // The unmerged graph might contain tracks that have been merged/pruned in the
+      // backend. We want the folders to match the persistable backend state.
+      std::set<std::string> valid_names;
+      if (dsg.graph && dsg.graph->hasLayer(DsgLayers::OBJECTS)) {
+        const auto& backend_objects = dsg.graph->getLayer(DsgLayers::OBJECTS);
+        for (const auto& id_node_pair : backend_objects.nodes()) {
+          NodeSymbol sym(id_node_pair.first);
+          valid_names.insert(std::string(1, sym.category()) + "_" +
+                             std::to_string(sym.categoryId()));
+        }
+      }
+
+      for (const auto& entry : std::filesystem::directory_iterator(images_root)) {
+        if (entry.is_directory()) {
+          std::string dir_name = entry.path().filename().string();
+          // Skip 'temp' directory!
+          if (dir_name == "temp") continue;
+
+          // Check if it looks like an object folder O_<digits>
+          if (dir_name.size() > 2 && dir_name.rfind("O_", 0) == 0) {
+            if (valid_names.find(dir_name) == valid_names.end()) {
+              try {
+                std::filesystem::remove_all(entry.path());
+                LOG(INFO) << "Deleted orphaned object folder: " << entry.path();
+              } catch (const std::exception& e) {
+                LOG(WARNING) << "Failed to delete orphan: " << e.what();
+              }
+            }
+          }
+        }
+      }
+    }
+  }
   MLOG(1) << "object update: " << num_changed << " node(s)";
 }
 
