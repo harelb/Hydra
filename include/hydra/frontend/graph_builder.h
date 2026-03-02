@@ -57,6 +57,7 @@
 #include "hydra/frontend/surface_place_extractor.h"
 #include "hydra/frontend/traversability_place_extractor.h"
 #include "hydra/frontend/view_database.h"
+#include "hydra/frontend/agent_image_extractor.h"
 #include "hydra/loop_closure/lcd_input.h"
 #include "hydra/odometry/pose_graph_from_odom.h"
 #include "hydra/utils/logging.h"
@@ -102,6 +103,8 @@ class GraphBuilder : public Module {
     bool no_packet_collation = false;
     //! @brief Drop object meshes for memory savings
     bool clear_object_meshes = false;
+    
+    AgentImageExtractor::Config agent_image_extractor;
   } const config;
 
   GraphBuilder(const Config& config,
@@ -190,6 +193,7 @@ class GraphBuilder : public Module {
   std::unique_ptr<places::TraversabilityPlaceExtractor> traversability_places_;
   std::unique_ptr<GvdPlaceExtractor> freespace_places_;
   std::unique_ptr<FrontierExtractor> frontier_places_;
+  std::unique_ptr<AgentImageExtractor> agent_extractor_;
   ViewDatabase view_database_;
 
   SceneGraphLogger frontend_graph_logger_;

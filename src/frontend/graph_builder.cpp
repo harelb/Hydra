@@ -104,6 +104,8 @@ void declare_config(GraphBuilder::Config& config) {
   field(config.sinks, "sinks");
   field(config.no_packet_collation, "no_packet_collation");
   field(config.clear_object_meshes, "clear_object_meshes");
+
+  field(config.agent_image_extractor, "agent_extractor");
 }
 
 GraphBuilder::GraphBuilder(const Config& config,
@@ -123,6 +125,8 @@ GraphBuilder::GraphBuilder(const Config& config,
       traversability_places_(config.traversability_places.create()),
       freespace_places_(config.freespace_places.create()),
       frontier_places_(config.frontier_places.create()),
+      agent_extractor_(
+          std::make_unique<AgentImageExtractor>(config.agent_image_extractor)),
       view_database_(config.view_database),
       sinks_(Sink::instantiate(config.sinks)) {
   const auto& global_info = GlobalInfo::instance();
@@ -419,6 +423,10 @@ void GraphBuilder::updateImpl(const ActiveWindowOutput::Ptr& msg) {
 
   // TODO(nathan) follow up on whether or not we need to do stuff with the 3D places and
   // mesh
+
+  if (agent_extractor_) {
+    agent_extractor_->updateGraph(*dsg_->graph, *msg);
+  }
 }
 
 void GraphBuilder::updateMesh(const ActiveWindowOutput& input) {
