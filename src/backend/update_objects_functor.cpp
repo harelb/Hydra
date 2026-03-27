@@ -37,6 +37,8 @@
 #include <config_utilities/config.h>
 #include <config_utilities/validation.h>
 #include <glog/logging.h>
+#include <spark_dsg/dynamic_scene_graph.h>
+#include <spark_dsg/node_attributes.h>
 #include <spark_dsg/printing.h>
 
 #include <filesystem>
@@ -71,10 +73,11 @@ NodeAttributes::Ptr mergeObjectAttributes(const VerbosityConfig& config,
   auto iter = nodes.begin();
   auto attrs_ptr = graph.getNode(*iter).attributes().clone();
   auto& new_attrs =
-      *CHECK_NOTNULL(dynamic_cast<ObjectNodeAttributes*>(attrs_ptr.get()));
+      *CHECK_NOTNULL(dynamic_cast<spark_dsg::ObjectNodeAttributes*>(attrs_ptr.get()));
 
   // Cast to KhronosObjectAttributes to access image_folder
-  auto* new_khronos_attrs = dynamic_cast<KhronosObjectAttributes*>(&new_attrs);
+  auto* new_khronos_attrs =
+      dynamic_cast<spark_dsg::KhronosObjectAttributes*>(&new_attrs);
 
   ++iter;
   while (iter != nodes.end()) {
@@ -84,7 +87,7 @@ NodeAttributes::Ptr mergeObjectAttributes(const VerbosityConfig& config,
     // Merge images logic
     if (new_khronos_attrs) {
       const auto* from_khronos_attrs =
-          dynamic_cast<const KhronosObjectAttributes*>(&from_attrs);
+          dynamic_cast<const spark_dsg::KhronosObjectAttributes*>(&from_attrs);
 
       if (from_khronos_attrs && !from_khronos_attrs->image_folder.empty()) {
         if (new_khronos_attrs->image_folder.empty()) {
@@ -184,6 +187,9 @@ void UpdateObjectsFunctor::call(const DynamicSceneGraph& unmerged,
 
   // we want to use the unmerged graph for most things
   const auto& objects = unmerged.getLayer(DsgLayers::OBJECTS);
+
+  VLOG(5) << "UpdateObjectsFunctor running on " << objects.nodes().size() << " nodes.";
+
   // we want to iterate over the unmerged graph
   const auto new_loopclosure = info->loop_closure_detected;
   active_tracker.clear();  // reset from previous pass
@@ -201,21 +207,23 @@ void UpdateObjectsFunctor::call(const DynamicSceneGraph& unmerged,
   for (const auto& id_node_pair : objects.nodes()) {
     const auto& node = *id_node_pair.second;
     ++num_changed;
-    auto attrs = node.tryAttributes<ObjectNodeAttributes>();
+    auto attrs = node.tryAttributes<spark_dsg::ObjectNodeAttributes>();
     if (!attrs) {
       continue;  // not an object
     }
 
     // Clone attributes first so we can modify them for the backend
     auto new_attrs_ptr = attrs->clone();
-    auto* new_attrs = dynamic_cast<ObjectNodeAttributes*>(new_attrs_ptr.get());
+    auto* new_attrs =
+        dynamic_cast<spark_dsg::ObjectNodeAttributes*>(new_attrs_ptr.get());
     if (!new_attrs) {
       LOG(ERROR) << "Failed to cast cloned attributes to ObjectNodeAttributes";
       continue;
     }
 
     // Check for image folder update (Move from temp -> final)
-    if (auto* khronos_attrs = dynamic_cast<KhronosObjectAttributes*>(new_attrs)) {
+    if (auto* khronos_attrs =
+            dynamic_cast<spark_dsg::KhronosObjectAttributes*>(new_attrs)) {
       if (!khronos_attrs->image_folder.empty()) {
         std::filesystem::path current_path(khronos_attrs->image_folder);
 
@@ -232,6 +240,9 @@ void UpdateObjectsFunctor::call(const DynamicSceneGraph& unmerged,
 
         // If path is not the expected final one
         if (khronos_attrs->image_folder != expected_relative) {
+          VLOG(2) << "Updating image folder for node " << sym.str() << ": "
+                  << khronos_attrs->image_folder << " -> " << expected_relative;
+
           std::filesystem::path parent;
           // We need to find the "root" images directory.
           // If current path is absolute, we can try to deduce it.
@@ -266,11 +277,15 @@ void UpdateObjectsFunctor::call(const DynamicSceneGraph& unmerged,
 
                 // Remove source folder
                 std::filesystem::remove_all(current_path);
+                VLOG(2) << "Moved images from " << current_path << " to " << new_path;
 
               } catch (const std::exception& e) {
                 LOG(WARNING) << "Failed to move object images from " << current_path
                              << " to " << new_path << ": " << e.what();
               }
+            } else {
+              VLOG(5) << "Source path " << current_path
+                      << " does not exist, skipping move.";
             }
           }
 
@@ -357,8 +372,8 @@ MergeList UpdateObjectsFunctor::findMerges(const DynamicSceneGraph& graph,
       objects,
       view,
       [](const SceneGraphNode& lhs, const SceneGraphNode& rhs) {
-        const auto lhs_attrs = lhs.tryAttributes<ObjectNodeAttributes>();
-        const auto rhs_attrs = rhs.tryAttributes<ObjectNodeAttributes>();
+        const auto lhs_attrs = lhs.tryAttributes<spark_dsg::ObjectNodeAttributes>();
+        const auto rhs_attrs = rhs.tryAttributes<spark_dsg::ObjectNodeAttributes>();
         if (!lhs_attrs || !rhs_attrs) {
           return false;
         }
