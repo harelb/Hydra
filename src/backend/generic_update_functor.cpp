@@ -36,7 +36,10 @@
 
 #include <config_utilities/config.h>
 #include <config_utilities/validation.h>
+#include <filesystem>
 #include <glog/logging.h>
+#include <spark_dsg/node_attributes.h>
+#include <spark_dsg/scene_graph_types.h>
 
 #include "hydra/utils/timing_utilities.h"
 
@@ -49,7 +52,58 @@ static const auto registration =
                                    GenericUpdateFunctor::Config>(
         "GenericUpdateFunctor");
 
+using spark_dsg::KhronosObjectAttributes;
+using spark_dsg::NodeSymbol;
+
+void moveImageFiles(const std::filesystem::path& src, const std::filesystem::path& dest) {
+  if (!std::filesystem::exists(src)) {
+    return;
+  }
+  if (!std::filesystem::exists(dest)) {
+    std::filesystem::create_directories(dest);
+  }
+  for (const auto& entry : std::filesystem::directory_iterator(src)) {
+    try {
+      std::filesystem::rename(entry.path(), dest / entry.path().filename());
+    } catch (const std::exception& e) {
+      LOG(WARNING) << "[GenericUpdateFunctor] failed to move " << entry.path() << ": " << e.what();
+    }
+  }
+  try {
+    std::filesystem::remove(src);
+  } catch (...) {
+  }
 }
+
+// Consolidate image folders when nodes merge. nodes[0] is the surviving node.
+NodeAttributes::Ptr mergeKhronosImageFolders(const DynamicSceneGraph& graph,
+                                             const std::vector<NodeId>& nodes) {
+  if (nodes.empty()) {
+    return nullptr;
+  }
+  auto attrs_ptr = graph.getNode(nodes[0]).attributes().clone();
+  auto* surviving = dynamic_cast<KhronosObjectAttributes*>(attrs_ptr.get());
+
+  for (size_t i = 1; i < nodes.size(); ++i) {
+    const auto* from =
+        graph.getNode(nodes[i]).tryAttributes<KhronosObjectAttributes>();
+    if (!from || from->image_folder.empty()) {
+      continue;
+    }
+    if (!surviving) {
+      break;
+    }
+    if (surviving->image_folder.empty()) {
+      surviving->image_folder = from->image_folder;
+    } else {
+      moveImageFiles(std::filesystem::path(from->image_folder),
+                     std::filesystem::path(surviving->image_folder));
+    }
+  }
+  return attrs_ptr;
+}
+
+}  // namespace
 
 using timing::ScopedTimer;
 
@@ -78,6 +132,12 @@ UpdateFunctor::Hooks GenericUpdateFunctor::hooks() const {
     my_hooks.find_merges = [this](const auto& graph, const auto& info) {
       return findMerges(graph, info);
     };
+
+    if (config.layer == spark_dsg::DsgLayers::OBJECTS) {
+      my_hooks.merge = [](const auto& graph, const auto& nodes) {
+        return mergeKhronosImageFolders(graph, nodes);
+      };
+    }
   }
 
   return my_hooks;
@@ -98,6 +158,39 @@ void GenericUpdateFunctor::call(const DynamicSceneGraph& unmerged,
   deformation_interpolator.interpolateNodePositions(unmerged, *dsg.graph, info, view);
   MLOG(1) << "[Hydra Backend] " << config.layer << " update: " << layer.numNodes()
           << " nodes";
+
+  if (config.layer != spark_dsg::DsgLayers::OBJECTS) {
+    return;
+  }
+  if (!dsg.graph->hasLayer(config.layer)) {
+    return;
+  }
+  const char* output_dir_env = std::getenv("ADT4_OUTPUT_DIR");
+  if (!output_dir_env) {
+    return;
+  }
+  const std::filesystem::path images_root =
+      std::filesystem::path(output_dir_env) / "images";
+
+  const auto& backend_layer = dsg.graph->getLayer(config.layer);
+  for (const auto& [node_id, node] : backend_layer.nodes()) {
+    auto attrs_ptr = node->attributes().clone();
+    auto* khronos = dynamic_cast<KhronosObjectAttributes*>(attrs_ptr.get());
+    if (!khronos || khronos->image_folder.empty()) {
+      continue;
+    }
+    const std::filesystem::path current(khronos->image_folder);
+    if (current.string().find("/temp/") == std::string::npos) {
+      continue;  // already renamed
+    }
+    NodeSymbol sym(node_id);
+    const auto final_path =
+        images_root /
+        (std::string(1, sym.category()) + "_" + std::to_string(sym.categoryId()));
+    moveImageFiles(current, final_path);
+    khronos->image_folder = final_path.string();
+    dsg.graph->setNodeAttributes(node_id, std::move(attrs_ptr));
+  }
 }
 
 MergeList GenericUpdateFunctor::findMerges(const DynamicSceneGraph& graph,
