@@ -34,8 +34,38 @@
 #include <opencv2/opencv.hpp>
 
 #include "hydra/common/global_info.h"
+#include "hydra/input/camera.h"
 
 namespace hydra {
+
+namespace {
+
+// Serialize a 4x4 transform as a flat row-major JSON array. Matches the manual
+// JSON convention used elsewhere (see khronos mesh_object_extractor.cpp).
+std::string isometryToJsonArray(const Eigen::Isometry3d& transform) {
+  const Eigen::Matrix4d m = transform.matrix();
+  std::stringstream ss;
+  // Full double round-trip precision; default (6 sig figs) loses sub-cm on poses.
+  ss << std::setprecision(17);
+  ss << "[";
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      ss << m(r, c);
+      if (!(r == 3 && c == 3)) {
+        ss << ", ";
+      }
+    }
+  }
+  ss << "]";
+  return ss.str();
+}
+
+// Storage convention for persisted depth: 16-bit PNG in millimeters. The Python
+// reprojection multiplies stored values by depth_scale to recover meters.
+constexpr double kDepthScaleMetersPerUnit = 1.0e-3;
+constexpr const char* kDepthEncoding = "16UC1_mm";
+
+}  // namespace
 
 void declare_config(AgentImageExtractor::Config& config) {
   using namespace config;
@@ -128,11 +158,40 @@ void AgentImageExtractor::updateGraph(DynamicSceneGraph& graph, const ActiveWind
 
       const auto& sensor_data = *input.sensor_data;
 
-      std::stringstream ss;
-      ss << "agent_" << attrs.timestamp.count();
+      const std::string name = "agent_" + std::to_string(attrs.timestamp.count());
       std::filesystem::path base_path =
-          std::filesystem::path(config.image_output_path) / ss.str();
-          
+          std::filesystem::path(config.image_output_path) / name;
+
+      // Write the run-level calibration once. Reprojecting a stored mask to 3D
+      // requires intrinsics + extrinsics, which are constant for a fixed camera,
+      // so we keep them out of the per-keyframe metadata.
+      if (!calib_written_) {
+        const auto* camera = dynamic_cast<const Camera*>(&sensor_data.getSensor());
+        if (camera) {
+          const auto& cc = camera->getConfig();
+          std::filesystem::path calib_path =
+              std::filesystem::path(config.image_output_path) / "camera_calib.json";
+          std::ofstream calib(calib_path);
+          calib << std::setprecision(17);
+          calib << "{\n";
+          calib << "  \"fx\": " << cc.fx << ",\n";
+          calib << "  \"fy\": " << cc.fy << ",\n";
+          calib << "  \"cx\": " << cc.cx << ",\n";
+          calib << "  \"cy\": " << cc.cy << ",\n";
+          calib << "  \"width\": " << cc.width << ",\n";
+          calib << "  \"height\": " << cc.height << ",\n";
+          calib << "  \"depth_scale\": " << kDepthScaleMetersPerUnit << ",\n";
+          calib << "  \"depth_encoding\": \"" << kDepthEncoding << "\",\n";
+          calib << "  \"body_T_sensor\": "
+                << isometryToJsonArray(camera->body_T_sensor()) << "\n";
+          calib << "}\n";
+          calib_written_ = true;
+        } else {
+          VLOG(1) << "[AgentImageExtractor] Sensor is not a Camera; skipping "
+                     "calibration export (reprojection will be unavailable).";
+        }
+      }
+
       // Save RGB (OpenCV uses BGR)
       if (!sensor_data.color_image.empty()) {
         cv::Mat rgb_image;
@@ -143,14 +202,38 @@ void AgentImageExtractor::updateGraph(DynamicSceneGraph& graph, const ActiveWind
         }
         cv::imwrite(base_path.string() + "_rgb.jpg", rgb_image);
       }
-      
-      // Save Depth
+
+      // Save Depth losslessly. After input conversion depth_image is CV_32FC1 in
+      // meters (see input_conversion.cpp); PNG cannot store float, so we convert
+      // to 16-bit millimeters to round-trip cleanly.
       if (!sensor_data.depth_image.empty()) {
-        cv::imwrite(base_path.string() + "_depth.png", sensor_data.depth_image);
+        const cv::Mat& depth = sensor_data.depth_image;
+        cv::Mat depth_to_save;
+        if (depth.type() == CV_32FC1) {
+          depth.convertTo(depth_to_save, CV_16UC1, 1.0 / kDepthScaleMetersPerUnit);
+        } else {
+          // Already integer depth (assumed millimeters); store as-is.
+          depth_to_save = depth;
+        }
+        cv::imwrite(base_path.string() + "_depth.png", depth_to_save);
+      }
+
+      // Per-keyframe metadata: dynamic data only (pose + file references). Static
+      // calibration lives in camera_calib.json.
+      {
+        std::ofstream meta(base_path.string() + "_meta.json");
+        meta << "{\n";
+        meta << "  \"timestamp_ns\": " << attrs.timestamp.count() << ",\n";
+        meta << "  \"world_T_body\": "
+             << isometryToJsonArray(sensor_data.world_T_body) << ",\n";
+        meta << "  \"rgb_file\": \"" << name << "_rgb.jpg\",\n";
+        meta << "  \"depth_file\": \"" << name << "_depth.png\",\n";
+        meta << "  \"calib\": \"camera_calib.json\"\n";
+        meta << "}\n";
       }
 
       attrs.image_folder = base_path.string();
-      
+
       VLOG(3) << "[AgentImageExtractor] Triggered keyframe extraction for agent " 
               << spark_dsg::NodeSymbol(node->id).str() 
               << " @ " << attrs.timestamp.count() << " ns";

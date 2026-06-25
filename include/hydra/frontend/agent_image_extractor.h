@@ -74,6 +74,9 @@ class AgentImageExtractor {
     Eigen::Quaterniond orientation;
     bool initialized = false;
   } last_keyframe_;
+
+  //! Whether the run-level camera_calib.json has been written yet.
+  bool calib_written_ = false;
 };
 
 void declare_config(AgentImageExtractor::Config& config);
