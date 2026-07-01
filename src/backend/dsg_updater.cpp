@@ -41,6 +41,7 @@
 #include <glog/stl_logging.h>
 #include <kimera_pgmo/utils/mesh_io.h>
 
+#include "hydra/backend/backend_utilities.h"
 #include "hydra/common/launch_callbacks.h"
 #include "hydra/utils/pgmo_mesh_traits.h"  // IWYU pragma: keep
 #include "hydra/utils/timing_utilities.h"
@@ -104,6 +105,14 @@ DsgUpdater::DsgUpdater(const Config& config,
 void DsgUpdater::save(const DataDirectory& output, const std::string& label) const {
   std::lock_guard<std::mutex> graph_lock(target_dsg_->mutex);
   const auto graph_path = output.path(label);
+
+  // Consistency cleanup before serializing: the backend merge drops image_folder on
+  // agent (and occasionally object) nodes that archive before the frontend extractor
+  // populates them. Restore them deterministically from on-disk keyframe/crop files so
+  // the saved DSG is self-consistent for both layers.
+  utils::reconcileAgentImageFolders(*target_dsg_->graph);
+  utils::reconcileObjectImageFolders(*target_dsg_->graph);
+
   target_dsg_->graph->save(graph_path / "dsg.json", false);
   target_dsg_->graph->save(graph_path / "dsg_with_mesh.json");
 

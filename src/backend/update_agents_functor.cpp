@@ -41,6 +41,7 @@
 
 #include <iomanip>
 
+#include "hydra/backend/backend_utilities.h"
 #include "hydra/utils/printing.h"
 #include "hydra/utils/timing_utilities.h"
 
@@ -108,6 +109,12 @@ void UpdateAgentsFunctor::call(const DynamicSceneGraph&,
                    << displayNodeSymbolContainer(missing_nodes);
     }
   }
+
+  // Mirror the object image_folder handling: the merge into the backend graph skips
+  // attribute updates for archived agent nodes, so a keyframe extracted after its node
+  // archived never gets its image_folder. Restore it from the on-disk keyframe files
+  // (keyed on the node timestamp) so the backend graph stays consistent with objects.
+  utils::reconcileAgentImageFolders(graph);
 }
 
 }  // namespace hydra
