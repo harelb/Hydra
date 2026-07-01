@@ -33,22 +33,22 @@
  * purposes notwithstanding any copyright notation herein.
  * -------------------------------------------------------------------------- */
 #pragma once
-#include <cstdint>
-#include <filesystem>
-#include <set>
+#include <kimera_pgmo/deformation_graph.h>
+#include <spark_dsg/scene_graph.h>
 
 namespace hydra {
 
-struct LabelSpaceConfig {
-  size_t total_labels = 0;
-  std::set<uint32_t> dynamic_labels;
-  std::set<uint32_t> invalid_labels;
-  std::set<uint32_t> object_labels;
-  std::set<uint32_t> surface_places_labels;
-  std::filesystem::path colormap_filepath;
-  std::filesystem::path label_remap_filepath;
-};
+class OptimizationHook {
+ public:
+  using Ptr = std::unique_ptr<OptimizationHook>;
+  using NodeRobotMap = std::map<spark_dsg::NodeId, int>;
 
-void declare_config(LabelSpaceConfig& conf);
+  virtual ~OptimizationHook() = default;
+
+  virtual void updateProblem(size_t timestamp_ns,
+                             const spark_dsg::SceneGraph& graph,
+                             kimera_pgmo::DeformationGraph& deformation_graph,
+                             const NodeRobotMap* robot_lookup = nullptr) const = 0;
+};
 
 }  // namespace hydra

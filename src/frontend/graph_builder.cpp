@@ -121,7 +121,7 @@ GraphBuilder::GraphBuilder(const Config& config,
       map_window_(GlobalInfo::instance().createVolumetricWindow()),
       tracker_(config.pose_graph_tracker.create()),
       surface_places_(config.surface_places.create(
-          GlobalInfo::instance().getLabelSpaceConfig().surface_places_labels)),
+          GlobalInfo::instance().labelspace().surface_places_labels)),
       traversability_places_(config.traversability_places.create()),
       freespace_places_(config.freespace_places.create()),
       frontier_places_(config.frontier_places.create()),
@@ -132,7 +132,7 @@ GraphBuilder::GraphBuilder(const Config& config,
   const auto& global_info = GlobalInfo::instance();
   if (config.enable_mesh_objects) {
     segmenter_ = std::make_unique<MeshSegmenter>(
-        config.object_config, global_info.getLabelSpaceConfig().object_labels);
+        config.object_config, global_info.labelspace().object_labels);
   }
 
   CHECK(dsg_ != nullptr);
@@ -543,9 +543,11 @@ void GraphBuilder::updatePlaces(const ActiveWindowOutput& input) {
     std::vector<NodeId> archived_places;
     for (const auto& [node_id, node] :
          dsg_->graph->getLayer(DsgLayers::PLACES).nodes()) {
-      auto& attrs = node->attributes();
+      auto& attrs = node->attributes<PlaceNodeAttributes>();
       const auto prev_active = attrs.is_active;
-      attrs.is_active = active_nodes.count(node_id);
+      if (attrs.real_place) {
+        attrs.is_active = active_nodes.count(node_id);
+      }
       if (prev_active && !attrs.is_active) {
         archived_places.push_back(node_id);
       }
@@ -554,10 +556,6 @@ void GraphBuilder::updatePlaces(const ActiveWindowOutput& input) {
     if (lcd_input_) {
       lcd_input_->archived_places.insert(archived_places.begin(),
                                          archived_places.end());
-    }
-
-    if (frontier_places_) {
-      frontier_places_->setArchivedPlaces(archived_places);
     }
   }  // end graph update critical section
 }

@@ -33,31 +33,46 @@
  * purposes notwithstanding any copyright notation herein.
  * -------------------------------------------------------------------------- */
 #pragma once
-#include "hydra/loop_closure/detector.h"
+#include <cstdint>
+#include <filesystem>
+#include <map>
+#include <optional>
+#include <set>
+#include <string>
 
 namespace hydra {
 
-struct LoopClosureConfig {
-  lcd::LcdDetectorConfig detector;
-  bool visualize_dsg_lcd = false;
-  std::string lcd_visualizer_ns = "/dsg/lcd_visualizer";
-  double lcd_agent_horizon_s = 1.5;
-  double descriptor_creation_horizon_m = 10.0;
+struct Labelspace {
+  //! Number of total labels in the labelspace
+  size_t total_labels = 0;
+  //! Labels that should be treated as dynamic
+  std::set<uint32_t> dynamic_labels;
+  //! Labels that should be treated as invalid (e.g., sky, unknown)
+  std::set<uint32_t> invalid_labels;
+  //! Labels to use for object extraction
+  std::set<uint32_t> object_labels;
+  //! Labels to use for mesh place extraction
+  std::set<uint32_t> surface_places_labels;
+  //! Human readable category names for the labelspace
+  std::map<uint32_t, std::string> label_names;
 };
 
-namespace lcd {
-void declare_config(LayerLcdConfig& conf);
-void declare_config(LayerRegistrationConfig& conf);
-void declare_config(DescriptorMatchConfig& conf);
-void declare_config(GnnLcdConfig& conf);
-void declare_config(LcdDetectorConfig& conf);
-}  // namespace lcd
+void declare_config(Labelspace& config);
 
-void declare_config(SubgraphConfig& conf);
-void declare_config(LoopClosureConfig& conf);
+class LabelRemapper {
+ public:
+  // Construction
+  LabelRemapper();
+  explicit LabelRemapper(const std::filesystem::path& filepath);
+  virtual ~LabelRemapper() = default;
+
+  std::optional<uint32_t> remapLabel(const uint32_t from) const;
+
+  bool empty() const;
+  operator bool() const;
+
+ private:
+  std::map<uint32_t, uint32_t> label_remapping_;
+};
 
 }  // namespace hydra
-
-namespace teaser {
-void declare_config(RobustRegistrationSolver::Params& conf);
-}  // namespace teaser
