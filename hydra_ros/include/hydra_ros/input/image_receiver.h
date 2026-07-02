@@ -42,6 +42,9 @@
 #include <semantic_inference_msgs/msg/feature_image.hpp>
 #include <sensor_msgs/msg/image.hpp>
 
+#include <memory>
+
+#include "hydra/common/pipeline_queues.h"
 #include "hydra_ros/input/ros_data_receiver.h"
 
 namespace hydra {
@@ -166,6 +169,12 @@ class ImageReceiverImpl : public RosDataReceiver {
                                                       typename SemanticT::MsgType>;
   using Synchronizer = message_filters::Synchronizer<Policy>;
 
+  //! Full-rate color+depth tap that shares the color/depth subscriber filters.
+  using TapPolicy =
+      message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image,
+                                                      sensor_msgs::msg::Image>;
+  using TapSynchronizer = message_filters::Synchronizer<TapPolicy>;
+
   ImageReceiverImpl(const RosDataReceiver::Config& config,
                     const std::string& sensor_name);
   virtual ~ImageReceiverImpl() = default;
@@ -177,10 +186,14 @@ class ImageReceiverImpl : public RosDataReceiver {
                 const sensor_msgs::msg::Image::ConstSharedPtr& depth,
                 const SemanticMsgPtr& labels);
 
+  void tapCallback(const sensor_msgs::msg::Image::ConstSharedPtr& color,
+                   const sensor_msgs::msg::Image::ConstSharedPtr& depth);
+
   ColorSubscriber color_sub_;
   DepthSubscriber depth_sub_;
   SemanticT semantic_sub_;
   std::unique_ptr<Synchronizer> sync_;
+  std::unique_ptr<TapSynchronizer> tap_sync_;
 };
 
 template <typename SemanticT>
@@ -198,7 +211,31 @@ bool ImageReceiverImpl<SemanticT>::initImpl() {
                                depth_sub_.getFilter(),
                                semantic_sub_.getFilter()));
   sync_->registerCallback(&ImageReceiverImpl<SemanticT>::callback, this);
+
+  // Second, ungated 2-way synchronizer over the SAME color/depth subscriber
+  // filters. message_filters::SimpleFilter supports multiple downstream
+  // connections, so this shares the existing ROS subscriptions (no new sub).
+  // Its callback no-ops unless the sub-keyframe queue has been created.
+  tap_sync_.reset(new TapSynchronizer(
+      TapPolicy(config.queue_size), color_sub_.getFilter(), depth_sub_.getFilter()));
+  tap_sync_->registerCallback(&ImageReceiverImpl<SemanticT>::tapCallback, this);
   return true;
+}
+
+template <typename SemanticT>
+void ImageReceiverImpl<SemanticT>::tapCallback(
+    const sensor_msgs::msg::Image::ConstSharedPtr& color,
+    const sensor_msgs::msg::Image::ConstSharedPtr& depth) {
+  auto& queue = PipelineQueues::instance().subkeyframe_queue;
+  if (!queue) {
+    return;  // sub-keyframe capture not enabled — no copy, no work
+  }
+
+  const auto timestamp_ns = rclcpp::Time(color->header.stamp).nanoseconds();
+  auto packet = std::make_shared<ImageInputPacket>(timestamp_ns, sensor_name_);
+  color_sub_.fillInput(*color, *packet);
+  depth_sub_.fillInput(*depth, *packet);
+  queue->push(packet);
 }
 
 template <typename SemanticT>
