@@ -23,6 +23,7 @@ add_executable(
   frontend/test_keyframe_gate.cpp
   frontend/test_keyframe_writer.cpp
   frontend/test_mesh_segmenter.cpp
+  frontend/test_subkeyframe_anchor.cpp
   input/test_camera.cpp
   input/test_input_packet.cpp
   input/test_lidar.cpp
