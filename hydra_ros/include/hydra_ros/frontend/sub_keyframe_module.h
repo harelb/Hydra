@@ -14,9 +14,11 @@
 
 namespace hydra {
 
-// Standalone full-rate keyframe capture. Owns its own RGBD receiver (no label
-// dependency) and TF lookup, so it is NOT gated by semantic_inference. Writes
-// RGB+depth+pose to disk. DSG-node/anchor association is added in Phase 3.
+// Full-rate keyframe capture. Drains the shared PipelineQueues::subkeyframe_queue
+// (filled by the image receiver's in-memory tap) rather than owning its own RGBD
+// subscription, so there is one wire-decode per topic. Adds pose via TF lookup,
+// so it is NOT gated by semantic_inference. Writes RGB+depth+pose to disk.
+// DSG-node/anchor association is added in Phase 3.
 class SubKeyframeModule : public Module {
  public:
   struct Config {
@@ -24,8 +26,8 @@ class SubKeyframeModule : public Module {
     std::string image_output_path;
     std::string sensor_name = "camera";
     KeyframeGate::Config gate;
-    RGBDImageReceiver::Config receiver;
     TFLookup::Config tf_lookup;
+    size_t queue_max_size = 30;
   };
 
   SubKeyframeModule(const Config& config, const SharedDsgInfo::Ptr& dsg);
@@ -40,7 +42,6 @@ class SubKeyframeModule : public Module {
 
   Config config_;
   SharedDsgInfo::Ptr dsg_;
-  std::unique_ptr<RGBDImageReceiver> receiver_;
   std::unique_ptr<TFLookup> lookup_;
   KeyframeGate gate_;
   std::unique_ptr<KeyframeWriter> writer_;
