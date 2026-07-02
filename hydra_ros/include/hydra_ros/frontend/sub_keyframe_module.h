@@ -47,7 +47,6 @@ class SubKeyframeModule : public Module {
   KeyframeGate gate_;
   std::unique_ptr<KeyframeWriter> writer_;
   bool calib_written_ = false;
-  size_t sub_index_ = 0;
   std::atomic<bool> should_shutdown_{false};
   std::unique_ptr<std::thread> thread_;
 };
