@@ -43,6 +43,7 @@
 #include <kimera_pgmo/utils/common_functions.h>
 #include <kimera_pgmo/utils/mesh_io.h>
 #include <spark_dsg/node_attributes.h>
+#include <spark_dsg/node_symbol.h>
 #include <spark_dsg/printing.h>
 
 #include "hydra/common/global_info.h"
@@ -50,6 +51,7 @@
 #include "hydra/common/pipeline_queues.h"
 #include "hydra/frontend/frontier_extractor.h"
 #include "hydra/frontend/mesh_segmenter.h"
+#include "hydra/frontend/subkeyframe_anchor.h"
 #include "hydra/utils/pgmo_mesh_interface.h"
 #include "hydra/utils/pgmo_mesh_traits.h"  // IWYU pragma: keep
 #include "hydra/utils/printing.h"
@@ -427,6 +429,11 @@ void GraphBuilder::updateImpl(const ActiveWindowOutput::Ptr& msg) {
   if (agent_extractor_) {
     agent_extractor_->updateGraph(*dsg_->graph, *msg);
   }
+
+  // Runs after launchCallbacks (which joins updatePoseGraph), so this spin's
+  // agent anchors already exist. Executes on this (frontend) thread, the only
+  // thread permitted to mutate the frontend DSG.
+  updateSubKeyframes();
 }
 
 void GraphBuilder::updateMesh(const ActiveWindowOutput& input) {
@@ -610,6 +617,60 @@ void GraphBuilder::updatePoseGraph(const ActiveWindowOutput& input) {
   }
 
   assignBowVectors();
+}
+
+void GraphBuilder::updateSubKeyframes() {
+  // Max acceptable time gap between a sub-keyframe and its nearest agent anchor.
+  static constexpr uint64_t kMaxAnchorDtNs = 200000000;  // 200 ms
+
+  auto& node_queue = PipelineQueues::instance().subkeyframe_node_queue;
+  if (!node_queue) {
+    return;
+  }
+
+  while (!node_queue->empty()) {
+    const auto req = node_queue->pop();
+
+    std::lock_guard<std::mutex> lock(dsg_->mutex);
+
+    // Gather agent anchors from the AGENTS layer (mirrors assignBowVectors and
+    // the former SubKeyframeModule gather).
+    std::vector<AnchorCandidate> anchors;
+    const auto layer_key = dsg_->graph->getLayerKey(DsgLayers::AGENTS);
+    if (layer_key) {
+      const auto& prefix = GlobalInfo::instance().getRobotPrefix();
+      const auto layer = dsg_->graph->findLayer(layer_key->layer, prefix.key);
+      if (layer) {
+        for (const auto& [node_id, node] : layer->nodes()) {
+          const auto* a = node->tryAttributes<AgentNodeAttributes>();
+          if (!a) {
+            continue;
+          }
+          Eigen::Isometry3d world_T_anchor = Eigen::Isometry3d::Identity();
+          world_T_anchor.translation() = a->position;
+          world_T_anchor.linear() = a->world_R_body.toRotationMatrix();
+          anchors.push_back(
+              {node_id, static_cast<uint64_t>(a->timestamp.count()), world_T_anchor});
+        }
+      }
+    }
+
+    const auto anchor_idx =
+        selectNearestAnchor(anchors, req.timestamp_ns, kMaxAnchorDtNs);
+    if (!anchor_idx) {
+      continue;  // no nearby optimized keyframe yet; drop this request
+    }
+
+    auto attrs = buildSubKeyframeAttrs(anchors[*anchor_idx].id,
+                                       anchors[*anchor_idx].world_T_anchor,
+                                       req.world_T_subframe,
+                                       req.timestamp_ns,
+                                       req.image_folder);
+    dsg_->graph->emplaceNode(2,
+                             NodeSymbol('s', sub_index_++),
+                             std::move(attrs),
+                             static_cast<spark_dsg::PartitionId>('s'));
+  }
 }
 
 void GraphBuilder::assignBowVectors() {

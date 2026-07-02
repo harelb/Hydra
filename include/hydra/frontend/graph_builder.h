@@ -157,6 +157,11 @@ class GraphBuilder : public Module {
 
   void updatePoseGraph(const ActiveWindowOutput& msg);
 
+  //! Drain SubKeyframeModule requests and create sub-keyframe nodes. Runs on the
+  //! frontend spin thread (this class' thread) so all frontend-DSG mutation stays
+  //! single-threaded; the SubKeyframeModule only hands off requests via a queue.
+  void updateSubKeyframes();
+
  protected:
   void assignBowVectors();
 
@@ -199,6 +204,9 @@ class GraphBuilder : public Module {
   SceneGraphLogger frontend_graph_logger_;
   MessageQueue<PoseGraphPacket> pose_graph_updates_;
   std::list<pose_graph_tools::BowQuery::ConstPtr> cached_bow_messages_;
+
+  //! Monotonically increasing index for sub-keyframe node symbols ('s', idx).
+  size_t sub_index_ = 0;
 
   Sink::List sinks_;
 
