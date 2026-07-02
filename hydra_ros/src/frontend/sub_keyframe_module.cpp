@@ -6,7 +6,10 @@
 
 #include "hydra/common/global_info.h"
 #include "hydra/common/pipeline_queues.h"
+#include "hydra/frontend/subkeyframe_anchor.h"
 #include "hydra/input/camera.h"
+#include "spark_dsg/node_attributes.h"
+#include "spark_dsg/node_symbol.h"
 
 namespace hydra {
 
@@ -19,6 +22,7 @@ void declare_config(SubKeyframeModule::Config& config) {
   field(config.gate, "gate");
   field(config.tf_lookup, "tf_lookup");
   field(config.queue_max_size, "queue_max_size");
+  field(config.max_anchor_dt_ns, "max_anchor_dt_ns");
 }
 
 SubKeyframeModule::SubKeyframeModule(const Config& config,
@@ -118,8 +122,52 @@ void SubKeyframeModule::spin() {
         }
       }
 
+      std::string image_folder;
       if (writer_) {
         writer_->write(packet->timestamp_ns, packet->color, packet->depth);
+        image_folder = config_.image_output_path + "/subkf_" +
+                       std::to_string(packet->timestamp_ns);
+      }
+
+      // Gather agent anchors from the shared DSG.
+      std::vector<AnchorCandidate> anchors;
+      {
+        std::lock_guard<std::mutex> lock(dsg_->mutex);
+        const auto layer_key =
+            dsg_->graph->getLayerKey(spark_dsg::DsgLayers::AGENTS);
+        if (layer_key) {
+          const auto& prefix = GlobalInfo::instance().getRobotPrefix();
+          const auto layer = dsg_->graph->findLayer(layer_key->layer, prefix.key);
+          if (layer) {
+            for (const auto& [node_id, node] : layer->nodes()) {
+              const auto& a = node->attributes<spark_dsg::AgentNodeAttributes>();
+              Eigen::Isometry3d world_T_anchor = Eigen::Isometry3d::Identity();
+              world_T_anchor.translation() = a.position;
+              world_T_anchor.linear() = a.world_R_body.toRotationMatrix();
+              anchors.push_back({node_id,
+                                 static_cast<uint64_t>(a.timestamp.count()),
+                                 world_T_anchor});
+            }
+          }
+        }
+      }
+
+      const auto anchor_idx = selectNearestAnchor(
+          anchors, packet->timestamp_ns, config_.max_anchor_dt_ns);
+      if (!anchor_idx) {
+        continue;  // no nearby optimized keyframe yet
+      }
+
+      auto attrs = buildSubKeyframeAttrs(anchors[*anchor_idx].id,
+                                         anchors[*anchor_idx].world_T_anchor,
+                                         world_T_body, packet->timestamp_ns,
+                                         image_folder);
+      {
+        std::lock_guard<std::mutex> lock(dsg_->mutex);
+        dsg_->graph->emplaceNode(2,
+                                 spark_dsg::NodeSymbol('s', sub_index_++),
+                                 std::move(attrs),
+                                 static_cast<spark_dsg::PartitionId>('s'));
       }
     } catch (const std::exception& e) {
       LOG_EVERY_N(WARNING, 100)
