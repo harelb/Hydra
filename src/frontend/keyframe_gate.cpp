@@ -1,6 +1,15 @@
 #include "hydra/frontend/keyframe_gate.h"
 
+#include <config_utilities/config.h>
+
 namespace hydra {
+
+void declare_config(KeyframeGate::Config& config) {
+  using namespace config;
+  name("KeyframeGate::Config");
+  field(config.min_translation_m, "min_translation_m");
+  field(config.min_rotation_deg, "min_rotation_deg");
+}
 
 bool KeyframeGate::shouldTrigger(const Eigen::Vector3d& position,
                                  const Eigen::Quaterniond& orientation) {

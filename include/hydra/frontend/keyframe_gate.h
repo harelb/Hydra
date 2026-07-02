@@ -26,4 +26,6 @@ class KeyframeGate {
   Eigen::Quaterniond last_orientation_ = Eigen::Quaterniond::Identity();
 };
 
+void declare_config(KeyframeGate::Config& config);
+
 }  // namespace hydra

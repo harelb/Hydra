@@ -2,6 +2,8 @@
 
 #include <Eigen/Geometry>
 #include <opencv2/core.hpp>
+
+#include <cstdint>
 #include <string>
 
 namespace hydra {
