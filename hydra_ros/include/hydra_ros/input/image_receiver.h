@@ -38,6 +38,8 @@
 #include <message_filters/subscriber.h>
 #include <message_filters/sync_policies/approximate_time.h>
 
+#include <glog/logging.h>
+
 #include <rclcpp/time.hpp>
 #include <semantic_inference_msgs/msg/feature_image.hpp>
 #include <sensor_msgs/msg/image.hpp>
@@ -226,19 +228,27 @@ template <typename SemanticT>
 void ImageReceiverImpl<SemanticT>::tapCallback(
     const sensor_msgs::msg::Image::ConstSharedPtr& color,
     const sensor_msgs::msg::Image::ConstSharedPtr& depth) {
-  auto& queue = PipelineQueues::instance().subkeyframe_queue;
+  // Copy the shared_ptr (not a reference) so the MessageQueue is guaranteed
+  // alive across push even if stop() resets the member concurrently.
+  auto queue = PipelineQueues::instance().subkeyframe_queue;
   if (!queue) {
     return;  // sub-keyframe capture not enabled — no copy, no work
   }
 
-  const auto timestamp_ns = rclcpp::Time(color->header.stamp).nanoseconds();
-  auto packet = std::make_shared<ImageInputPacket>(timestamp_ns, sensor_name_);
-  color_sub_.fillInput(*color, *packet);
-  depth_sub_.fillInput(*depth, *packet);
-  // Non-blocking: drop the tap frame when the sub-keyframe queue is full rather
-  // than blocking this shared color/depth callback — a blocking push would
-  // backpressure into the main 3-way (semantic) reconstruction path.
-  queue->push(packet, /*blocking=*/false);
+  // The tap must never affect the main reconstruction callback: a cv_bridge or
+  // encoding throw here would otherwise unwind the shared executor thread.
+  try {
+    const auto timestamp_ns = rclcpp::Time(color->header.stamp).nanoseconds();
+    auto packet = std::make_shared<ImageInputPacket>(timestamp_ns, sensor_name_);
+    color_sub_.fillInput(*color, *packet);
+    depth_sub_.fillInput(*depth, *packet);
+    // Non-blocking: drop the tap frame when the sub-keyframe queue is full rather
+    // than blocking this shared color/depth callback — a blocking push would
+    // backpressure into the main 3-way (semantic) reconstruction path.
+    queue->push(packet, /*blocking=*/false);
+  } catch (const std::exception& e) {
+    LOG_EVERY_N(WARNING, 100) << "[SubKeyframe tap] dropped frame: " << e.what();
+  }
 }
 
 template <typename SemanticT>

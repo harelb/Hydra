@@ -9,7 +9,6 @@
 #include "hydra/common/shared_dsg_info.h"
 #include "hydra/frontend/keyframe_gate.h"
 #include "hydra/frontend/keyframe_writer.h"
-#include "hydra_ros/input/image_receiver.h"
 #include "hydra_ros/utils/tf_lookup.h"
 
 namespace hydra {
@@ -50,9 +49,6 @@ class SubKeyframeModule : public Module {
   std::unique_ptr<std::thread> thread_;
 };
 
-// KeyframeGate::Config (defined in hydra) has no declare_config of its own; we
-// provide one here so it can be parsed as a nested field of the module config.
-void declare_config(KeyframeGate::Config& config);
 void declare_config(SubKeyframeModule::Config& config);
 
 }  // namespace hydra

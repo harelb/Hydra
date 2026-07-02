@@ -10,13 +10,6 @@
 
 namespace hydra {
 
-void declare_config(KeyframeGate::Config& config) {
-  using namespace config;
-  name("KeyframeGate::Config");
-  field(config.min_translation_m, "min_translation_m");
-  field(config.min_rotation_deg, "min_rotation_deg");
-}
-
 void declare_config(SubKeyframeModule::Config& config) {
   using namespace config;
   name("SubKeyframeModule::Config");
