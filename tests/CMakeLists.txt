@@ -21,6 +21,7 @@ add_executable(
   common/test_shared_dsg_info.cpp
   frontend/test_graph_connector.cpp
   frontend/test_keyframe_gate.cpp
+  frontend/test_keyframe_writer.cpp
   frontend/test_mesh_segmenter.cpp
   input/test_camera.cpp
   input/test_input_packet.cpp
