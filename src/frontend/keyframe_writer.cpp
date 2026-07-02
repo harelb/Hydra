@@ -11,6 +11,7 @@ namespace hydra {
 namespace {
 
 constexpr double kDepthScaleMetersPerUnit = 1.0e-3;
+constexpr const char* kDepthEncoding = "16UC1_mm";
 
 std::string isometryToJsonArray(const Eigen::Isometry3d& transform) {
   const Eigen::Matrix4d m = transform.matrix();
@@ -41,13 +42,13 @@ void KeyframeWriter::writeCalib(const CameraCalib& calib) {
   f << "  \"cx\": " << calib.cx << ",\n  \"cy\": " << calib.cy << ",\n";
   f << "  \"width\": " << calib.width << ",\n  \"height\": " << calib.height << ",\n";
   f << "  \"depth_scale\": " << kDepthScaleMetersPerUnit << ",\n";
+  f << "  \"depth_encoding\": \"" << kDepthEncoding << "\",\n";
   f << "  \"body_T_sensor\": " << isometryToJsonArray(calib.body_T_sensor) << "\n}\n";
 }
 
 void KeyframeWriter::write(uint64_t timestamp_ns,
                            const cv::Mat& color_rgb,
-                           const cv::Mat& depth_m,
-                           const Eigen::Isometry3d& world_T_body) {
+                           const cv::Mat& depth_m) {
   const std::string base =
       (std::filesystem::path(output_dir_) / ("subkf_" + std::to_string(timestamp_ns)))
           .string();
@@ -75,7 +76,6 @@ void KeyframeWriter::write(uint64_t timestamp_ns,
   std::ofstream meta(base + "_meta.json");
   meta << "{\n";
   meta << "  \"timestamp_ns\": " << timestamp_ns << ",\n";
-  meta << "  \"world_T_body\": " << isometryToJsonArray(world_T_body) << ",\n";
   meta << "  \"rgb_file\": \"subkf_" << timestamp_ns << "_rgb.jpg\",\n";
   meta << "  \"depth_file\": \"subkf_" << timestamp_ns << "_depth.png\",\n";
   meta << "  \"calib\": \"camera_calib.json\"\n";

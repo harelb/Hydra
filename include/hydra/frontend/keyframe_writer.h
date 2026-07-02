@@ -22,8 +22,7 @@ class KeyframeWriter {
   void writeCalib(const CameraCalib& calib);
   void write(uint64_t timestamp_ns,
              const cv::Mat& color_rgb,
-             const cv::Mat& depth_m,
-             const Eigen::Isometry3d& world_T_body);
+             const cv::Mat& depth_m);
 
  private:
   std::string output_dir_;
