@@ -4,6 +4,9 @@
 #include <config_utilities/printing.h>
 #include <glog/logging.h>
 
+#include "hydra/common/global_info.h"
+#include "hydra/input/camera.h"
+
 namespace hydra {
 
 void declare_config(KeyframeGate::Config& config) {
@@ -18,6 +21,7 @@ void declare_config(SubKeyframeModule::Config& config) {
   name("SubKeyframeModule::Config");
   field(config.enabled, "enabled");
   field(config.image_output_path, "image_output_path");
+  field(config.sensor_name, "sensor_name");
   field(config.gate, "gate");
   field(config.receiver, "receiver");
   field(config.tf_lookup, "tf_lookup");
@@ -82,13 +86,33 @@ void SubKeyframeModule::spin() {
       continue;
     }
 
-    // TODO(Phase 3): write camera calibration once via writer_->writeCalib().
-    // RGBDImageReceiver exposes no Sensor object, so fx/fy/cx/cy are not
-    // available here; calib persistence needs a CameraInfo subscription or a
-    // sensor config field. Deferred rather than fabricating intrinsics.
+    // Write the run-level camera calibration once, sourced from the globally
+    // registered Camera sensor (intrinsics + extrinsics are constant for a
+    // fixed camera, so they live outside the per-keyframe metadata). Mirrors
+    // AgentImageExtractor::updateGraph.
+    if (writer_ && !calib_written_) {
+      const auto sensor = GlobalInfo::instance().getSensor(config_.sensor_name);
+      const auto* camera = dynamic_cast<const Camera*>(sensor.get());
+      if (camera) {
+        const auto& cc = camera->getConfig();
+        CameraCalib calib;
+        calib.fx = cc.fx;
+        calib.fy = cc.fy;
+        calib.cx = cc.cx;
+        calib.cy = cc.cy;
+        calib.width = cc.width;
+        calib.height = cc.height;
+        calib.body_T_sensor = camera->body_T_sensor();
+        writer_->writeCalib(calib);
+        calib_written_ = true;
+      } else {
+        VLOG(1) << "[SubKeyframeModule] sensor '" << config_.sensor_name
+                << "' not a Camera yet; calib deferred to a later frame";
+      }
+    }
+
     if (writer_) {
-      writer_->write(
-          packet->timestamp_ns, packet->color, packet->depth, world_T_body);
+      writer_->write(packet->timestamp_ns, packet->color, packet->depth);
     }
   }
 }

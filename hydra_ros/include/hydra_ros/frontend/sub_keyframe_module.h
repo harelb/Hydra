@@ -22,6 +22,7 @@ class SubKeyframeModule : public Module {
   struct Config {
     bool enabled = false;
     std::string image_output_path;
+    std::string sensor_name = "camera";
     KeyframeGate::Config gate;
     RGBDImageReceiver::Config receiver;
     TFLookup::Config tf_lookup;
@@ -43,6 +44,7 @@ class SubKeyframeModule : public Module {
   std::unique_ptr<TFLookup> lookup_;
   KeyframeGate gate_;
   std::unique_ptr<KeyframeWriter> writer_;
+  bool calib_written_ = false;
   std::atomic<bool> should_shutdown_{false};
   std::unique_ptr<std::thread> thread_;
 };
