@@ -235,7 +235,10 @@ void ImageReceiverImpl<SemanticT>::tapCallback(
   auto packet = std::make_shared<ImageInputPacket>(timestamp_ns, sensor_name_);
   color_sub_.fillInput(*color, *packet);
   depth_sub_.fillInput(*depth, *packet);
-  queue->push(packet);
+  // Non-blocking: drop the tap frame when the sub-keyframe queue is full rather
+  // than blocking this shared color/depth callback — a blocking push would
+  // backpressure into the main 3-way (semantic) reconstruction path.
+  queue->push(packet, /*blocking=*/false);
 }
 
 template <typename SemanticT>
