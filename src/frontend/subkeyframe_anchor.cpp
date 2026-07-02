@@ -28,4 +28,22 @@ Eigen::Isometry3d computeRelativeTransform(
   return world_T_anchor.inverse() * world_T_subframe;
 }
 
+std::unique_ptr<spark_dsg::SubKeyframeNodeAttributes> buildSubKeyframeAttrs(
+    spark_dsg::NodeId anchor_id,
+    const Eigen::Isometry3d& world_T_anchor,
+    const Eigen::Isometry3d& world_T_subframe,
+    uint64_t timestamp_ns,
+    const std::string& image_folder) {
+  auto attrs = std::make_unique<spark_dsg::SubKeyframeNodeAttributes>();
+  attrs->anchor_node_id = anchor_id;
+  const Eigen::Isometry3d rel =
+      computeRelativeTransform(world_T_anchor, world_T_subframe);
+  attrs->anchor_t_subframe = rel.translation();
+  attrs->anchor_R_subframe = Eigen::Quaterniond(rel.rotation());
+  attrs->position = world_T_subframe.translation();  // seed; backend refines
+  attrs->image_folder = image_folder;
+  attrs->timestamp = std::chrono::nanoseconds(timestamp_ns);
+  return attrs;
+}
+
 }  // namespace hydra
