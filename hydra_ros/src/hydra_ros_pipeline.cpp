@@ -70,6 +70,7 @@ void declare_config(HydraRosPipeline::Config& config) {
   field(config.verbosity, "verbosity");
   field(config.preprint_config, "preprint_config");
   field(config.status_monitor, "status_monitor");
+  field(config.sub_keyframe, "sub_keyframe");
 }
 
 HydraRosPipeline::HydraRosPipeline(int robot_id, int config_verbosity)
@@ -135,6 +136,12 @@ void HydraRosPipeline::init() {
       std::make_shared<RosInputModule>(config.input, active_window_->queue());
   if (config.features) {
     modules_["features"] = config.features.create();  // has to come after input module
+  }
+
+  if (config.sub_keyframe.enabled) {
+    auto sub_keyframe =
+        std::make_shared<SubKeyframeModule>(config.sub_keyframe, frontend_dsg_);
+    modules_.emplace("sub_keyframe", sub_keyframe);
   }
 }
 

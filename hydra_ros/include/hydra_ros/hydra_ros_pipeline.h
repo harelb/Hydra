@@ -41,6 +41,7 @@
 
 #include <memory>
 
+#include "hydra_ros/frontend/sub_keyframe_module.h"
 #include "hydra_ros/input/feature_receiver.h"
 #include "hydra_ros/input/ros_input_module.h"
 #include "hydra_ros/utils/status_monitor.h"
@@ -73,6 +74,8 @@ class HydraRosPipeline : public HydraPipeline {
     bool preprint_config = false;
     //! @brief Monitor to report whether or Hydra is running normally
     StatusMonitor::Config status_monitor;
+    //! @brief Full-rate sub-keyframe capture (own RGBD receiver + TF lookup)
+    SubKeyframeModule::Config sub_keyframe;
   } const config;
 
   explicit HydraRosPipeline(int robot_id, int config_verbosity = 1);

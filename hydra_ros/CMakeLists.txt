@@ -40,6 +40,7 @@ add_library(
   src/backend/ros_backend_publisher.cpp
   src/backend/gt_room_publisher.cpp
   src/frontend/gvd_occupancy_publisher.cpp
+  src/frontend/sub_keyframe_module.cpp
   src/frontend/object_visualizer.cpp
   src/frontend/ros_frontend_publisher.cpp
   src/frontend/traversability_visualizer.cpp
@@ -108,7 +109,8 @@ rclcpp_components_register_node(
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest)
-  ament_add_gtest(test_${PROJECT_NAME} tests/main.cpp tests/test_ros_sensors.cpp)
+  ament_add_gtest(test_${PROJECT_NAME} tests/main.cpp tests/test_ros_sensors.cpp
+                  tests/test_sub_keyframe_module.cpp)
   target_link_libraries(test_${PROJECT_NAME} ${PROJECT_NAME} gflags)
 endif()
 
