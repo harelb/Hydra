@@ -28,7 +28,6 @@ class SubKeyframeModule : public Module {
     KeyframeGate::Config gate;
     TFLookup::Config tf_lookup;
     size_t queue_max_size = 30;
-    uint64_t max_anchor_dt_ns = 200000000;  // 200 ms
   };
 
   SubKeyframeModule(const Config& config, const SharedDsgInfo::Ptr& dsg);

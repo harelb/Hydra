@@ -20,7 +20,6 @@ void declare_config(SubKeyframeModule::Config& config) {
   field(config.gate, "gate");
   field(config.tf_lookup, "tf_lookup");
   field(config.queue_max_size, "queue_max_size");
-  field(config.max_anchor_dt_ns, "max_anchor_dt_ns");
 }
 
 SubKeyframeModule::SubKeyframeModule(const Config& config,
