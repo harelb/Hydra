@@ -105,6 +105,9 @@ class GraphBuilder : public Module {
     bool clear_object_meshes = false;
     
     AgentImageExtractor::Config agent_image_extractor;
+    //! @brief Max acceptable spatial distance (m) between a sub-keyframe and
+    //! its temporally-nearest agent anchor
+    double subkeyframe_anchor_max_dist_m = 2.0;
   } const config;
 
   GraphBuilder(const Config& config,

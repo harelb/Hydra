@@ -108,6 +108,7 @@ void declare_config(GraphBuilder::Config& config) {
   field(config.clear_object_meshes, "clear_object_meshes");
 
   field(config.agent_image_extractor, "agent_extractor");
+  field(config.subkeyframe_anchor_max_dist_m, "subkeyframe_anchor_max_dist_m");
 }
 
 GraphBuilder::GraphBuilder(const Config& config,
@@ -628,7 +629,7 @@ void GraphBuilder::updateSubKeyframes() {
   // pass through a revisited location), while the distance bound also
   // correctly accepts post-stop sub-keyframes, whose temporally-nearest agent
   // is time-far but spatially ~0 m away.
-  static constexpr double kMaxAnchorDistM = 2.0;
+  const double kMaxAnchorDistM = config.subkeyframe_anchor_max_dist_m;
 
   auto& node_queue = PipelineQueues::instance().subkeyframe_node_queue;
   if (!node_queue) {
