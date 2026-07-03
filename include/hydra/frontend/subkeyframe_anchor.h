@@ -27,10 +27,18 @@ struct SubKeyframeRequest {
   std::string image_folder;
 };
 
+// Selects the TEMPORALLY-nearest anchor (time is monotonic along the
+// trajectory, so this stays within the same pass even across loop closures),
+// then gates acceptance on SPATIAL distance: the rigid anchor_T_subframe
+// transform's error grows with the anchor<->sub-keyframe spatial span, and a
+// distance bound also correctly accepts post-stop sub-keyframes whose
+// temporally-nearest anchor is time-far but spatially co-located. Does NOT
+// fall back to a spatially-nearer but temporally-farther anchor.
 std::optional<size_t> selectNearestAnchor(
     const std::vector<AnchorCandidate>& anchors,
     uint64_t subframe_ts_ns,
-    uint64_t max_dt_ns);
+    const Eigen::Vector3d& subframe_position,
+    double max_dist_m);
 
 Eigen::Isometry3d computeRelativeTransform(
     const Eigen::Isometry3d& world_T_anchor,

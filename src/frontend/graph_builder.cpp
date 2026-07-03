@@ -620,12 +620,15 @@ void GraphBuilder::updatePoseGraph(const ActiveWindowOutput& input) {
 }
 
 void GraphBuilder::updateSubKeyframes() {
-  // Max acceptable time gap between a sub-keyframe and its nearest agent anchor.
-  // Agents are typically ~0.5-1 s apart, so a tight window drops mid-gap
-  // sub-keyframes (image on disk but no graph node), defeating the density goal.
-  // The stored anchor_T_subframe is valid over this local offset, so anchor to
-  // the nearest agent within a generous window.
-  static constexpr uint64_t kMaxAnchorDtNs = 2000000000;  // 2 s
+  // Max acceptable spatial distance between a sub-keyframe and the
+  // temporally-nearest agent anchor. The rigid anchor_T_subframe transform's
+  // error scales with (drift/loop_len) * span, so bounding the spatial span
+  // bounds that error. Anchor selection stays temporal (loop-safe: time is
+  // monotonic along the trajectory, so it can't grab an agent from a prior
+  // pass through a revisited location), while the distance bound also
+  // correctly accepts post-stop sub-keyframes, whose temporally-nearest agent
+  // is time-far but spatially ~0 m away.
+  static constexpr double kMaxAnchorDistM = 2.0;
 
   auto& node_queue = PipelineQueues::instance().subkeyframe_node_queue;
   if (!node_queue) {
@@ -659,8 +662,8 @@ void GraphBuilder::updateSubKeyframes() {
       }
     }
 
-    const auto anchor_idx =
-        selectNearestAnchor(anchors, req.timestamp_ns, kMaxAnchorDtNs);
+    const auto anchor_idx = selectNearestAnchor(
+        anchors, req.timestamp_ns, req.world_T_subframe.translation(), kMaxAnchorDistM);
     if (!anchor_idx) {
       continue;  // no nearby optimized keyframe yet; drop this request
     }

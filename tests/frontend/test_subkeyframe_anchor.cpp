@@ -4,21 +4,54 @@
 
 namespace hydra {
 
-TEST(SubkeyframeAnchor, SelectsNearestWithinTolerance) {
+namespace {
+Eigen::Isometry3d atPosition(double x, double y, double z) {
+  Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+  pose.translation() = Eigen::Vector3d(x, y, z);
+  return pose;
+}
+}  // namespace
+
+TEST(SubkeyframeAnchor, TemporalSelectionSpatialGate) {
+  // Temporally-nearest to ts=2100 is the t=2000 anchor. Place it within
+  // max_dist so it is accepted, even though other anchors are spatially
+  // closer to the sub-keyframe position.
   std::vector<AnchorCandidate> anchors = {
-      {1, 1000, Eigen::Isometry3d::Identity()},
-      {2, 2000, Eigen::Isometry3d::Identity()},
-      {3, 3000, Eigen::Isometry3d::Identity()},
+      {1, 1000, atPosition(0, 0, 0)},
+      {2, 2000, atPosition(1, 0, 0)},
+      {3, 3000, atPosition(0, 0, 0)},
   };
-  auto idx = selectNearestAnchor(anchors, 2100, /*max_dt_ns=*/500);
+  const Eigen::Vector3d subframe_position(1.1, 0, 0);
+  auto idx = selectNearestAnchor(anchors, 2100, subframe_position, /*max_dist_m=*/2.0);
   ASSERT_TRUE(idx.has_value());
   EXPECT_EQ(anchors[*idx].id, 2u);
 }
 
-TEST(SubkeyframeAnchor, RejectsWhenOutsideTolerance) {
-  std::vector<AnchorCandidate> anchors = {{1, 1000, Eigen::Isometry3d::Identity()}};
-  auto idx = selectNearestAnchor(anchors, 9000, /*max_dt_ns=*/500);
+TEST(SubkeyframeAnchor, RejectsWhenTemporallyNearestIsFar) {
+  // Temporally-nearest anchor (t=2000) is spatially far from the sub-keyframe,
+  // while a temporally-farther anchor (t=3000) is spatially close. Loop-safety
+  // requires we reject rather than fall back to the spatially-closer one.
+  std::vector<AnchorCandidate> anchors = {
+      {1, 1000, atPosition(0, 0, 0)},
+      {2, 2000, atPosition(100, 0, 0)},
+      {3, 3000, atPosition(0, 0, 0)},
+  };
+  const Eigen::Vector3d subframe_position(0, 0, 0);
+  auto idx = selectNearestAnchor(anchors, 2100, subframe_position, /*max_dist_m=*/2.0);
   EXPECT_FALSE(idx.has_value());
+}
+
+TEST(SubkeyframeAnchor, AcceptsPostStopNearAnchor) {
+  // Temporally-nearest anchor is far in time (large dt) but spatially at the
+  // sub-keyframe (dist ~ 0), e.g. the robot stopped. Should be accepted.
+  std::vector<AnchorCandidate> anchors = {
+      {1, 1000, atPosition(0, 0, 0)},
+  };
+  const Eigen::Vector3d subframe_position(0.01, 0, 0);
+  auto idx =
+      selectNearestAnchor(anchors, 9000000000ULL, subframe_position, /*max_dist_m=*/2.0);
+  ASSERT_TRUE(idx.has_value());
+  EXPECT_EQ(anchors[*idx].id, 1u);
 }
 
 TEST(SubkeyframeAnchor, RelativeTransformComposesBack) {
