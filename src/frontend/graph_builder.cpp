@@ -621,7 +621,11 @@ void GraphBuilder::updatePoseGraph(const ActiveWindowOutput& input) {
 
 void GraphBuilder::updateSubKeyframes() {
   // Max acceptable time gap between a sub-keyframe and its nearest agent anchor.
-  static constexpr uint64_t kMaxAnchorDtNs = 200000000;  // 200 ms
+  // Agents are typically ~0.5-1 s apart, so a tight window drops mid-gap
+  // sub-keyframes (image on disk but no graph node), defeating the density goal.
+  // The stored anchor_T_subframe is valid over this local offset, so anchor to
+  // the nearest agent within a generous window.
+  static constexpr uint64_t kMaxAnchorDtNs = 2000000000;  // 2 s
 
   auto& node_queue = PipelineQueues::instance().subkeyframe_node_queue;
   if (!node_queue) {
