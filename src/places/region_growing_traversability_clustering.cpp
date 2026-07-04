@@ -248,10 +248,15 @@ void RegionGrowingTraversabilityClustering::mergeRegions(
         const Eigen::Vector2i combined_max =
             region.max_coordinates.cwiseMax(neighbor_region.max_coordinates);
         if ((combined_max - combined_min).maxCoeff() <= max_region_size_) {
-          // Merge neighbor into this region.
+          // Merge neighbor into this region. NOTE: neighbor_id is a reference
+          // into region.neighbors, and region.merge() erases neighbor_id from
+          // region.neighbors (Region::merge -> neighbors.erase(other.id)),
+          // which frees that node and leaves neighbor_id dangling. Copy it by
+          // value before merging so the calls below don't read freed memory.
+          const NodeId neighbor_id_val = neighbor_id;
           region.merge(neighbor_region);
           regions_.erase(neighbor_it);
-          graph.removeNode(neighbor_id);
+          graph.removeNode(neighbor_id_val);
           merged = true;
           break;
         }
@@ -500,7 +505,11 @@ void RegionGrowingTraversabilityClustering::Region::computeBoundary() {
     centroid += voxel.cast<float>();
   }
 
-  centroid /= exterior_boundary.size();
+  // Guard against an empty exterior boundary (e.g. a region with no boundary
+  // voxels): dividing a zero vector by 0 yields a NaN centroid/place position.
+  if (!exterior_boundary.empty()) {
+    centroid /= exterior_boundary.size();
+  }
 }
 
 void RegionGrowingTraversabilityClustering::Region::computeNeighbors(
