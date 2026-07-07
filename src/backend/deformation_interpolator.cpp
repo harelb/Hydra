@@ -87,15 +87,13 @@ NodeCache::Entry* NodeCache::add(NodeId node_id, const NodeAttributes& attrs) {
   if (iter == nodes.end()) {
     return &nodes
                 .emplace(node_id,
-                         Entry{node_id,
-                               attrs.last_update_time_ns,
-                               attrs.position.cast<float>()})
+                         Entry{node_id, timestamp_ns, attrs.position.cast<float>()})
                 .first->second;
   }
 
   if (attrs.is_active) {
     iter->second.init_pos = attrs.position.cast<float>();
-    iter->second.timestamp = attrs.last_update_time_ns;
+    iter->second.timestamp = timestamp_ns;
   }
 
   return &iter->second;
@@ -195,7 +193,13 @@ void DeformationInterpolator::interpolate(const DynamicSceneGraph& unmerged,
 
       auto node_ptr = dsg.findNode(entry->id);
       if (node_ptr) {
-        node_ptr->attributes().position = new_pos;
+        // Reset to the cached original position before applying the transform so
+        // repeated deformation of an archived node stays idempotent (otherwise the
+        // transform compounds across loop-closure spins). transform() also moves
+        // the bounding box + orientation.
+        auto& dst = node_ptr->attributes();
+        dst.position = entry->init_pos.cast<double>();
+        dst.transform(transform);
       }
     };
 
