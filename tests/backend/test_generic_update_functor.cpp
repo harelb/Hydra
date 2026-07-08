@@ -262,6 +262,44 @@ TEST(GenericUpdateFunctor, mergeUnionsImageFoldersViaMergeTracker) {
   EXPECT_FALSE(std::filesystem::exists(images_root / "O_1"));
 }
 
+// With object archival, the merged-graph copy of an archived node is never refreshed
+// by mergeGraph, so the temp->final rename must key off the UNMERGED graph (which the
+// backend now syncs with update_archived_attributes) and mirror the final path onto
+// the merged copy where it sticks. Regression for box_9: 0 renames, all folders unset.
+TEST(GenericUpdateFunctor, renameReadsUnmergedAndWritesMerged) {
+  ScopedOutputDir tmp("rename_unmerged");
+  const auto images_root = tmp.path / "images";
+  writeFile(images_root / "temp" / "O_track7" / "crop_a.png");
+
+  auto dsg = test::makeSharedDsg();
+  auto& merged = *dsg->graph;
+  // archived merged copy with stale (empty) folder: mergeGraph never refreshed it
+  {
+    auto attrs = makeObject("");
+    attrs->is_active = false;
+    merged.emplaceNode(DsgLayers::OBJECTS, NodeSymbol('O', 0), std::move(attrs));
+  }
+  // unmerged copy carries the frontend's temp pointer
+  const auto unmerged = merged.clone();
+  {
+    auto attrs = makeObject((images_root / "temp" / "O_track7").string());
+    attrs->is_active = false;
+    unmerged->setNodeAttributes(NodeSymbol('O', 0), std::move(attrs));
+  }
+
+  auto config = defaultConfig();
+  config.enable_merging = false;
+  GenericUpdateFunctor functor(config);
+  UpdateInfo::ConstPtr info(new UpdateInfo{0, nullptr, nullptr, false, {}});
+  functor.call(*unmerged, *dsg, info);
+
+  EXPECT_TRUE(std::filesystem::exists(images_root / "O_0" / "crop_a.png"));
+  EXPECT_FALSE(std::filesystem::exists(images_root / "temp" / "O_track7"));
+  const auto& attrs =
+      merged.getNode(NodeSymbol('O', 0)).attributes<KhronosObjectAttributes>();
+  EXPECT_EQ(attrs.image_folder, (images_root / "O_0").string());
+}
+
 // The frontend can DELETE object nodes (GraphUpdater delete updates), so a merge
 // parent recorded in the tracker may vanish from the odometric unmerged graph. The
 // tracker must drop that merge set instead of letting the hook throw std::out_of_range

@@ -225,22 +225,32 @@ void GenericUpdateFunctor::call(const DynamicSceneGraph& unmerged,
   const std::filesystem::path images_root =
       std::filesystem::path(output_dir_env) / "images";
 
-  const auto& backend_layer = dsg.graph->getLayer(config.layer);
-  for (const auto& [node_id, node] : backend_layer.nodes()) {
-    auto attrs_ptr = node->attributes().clone();
-    auto* khronos = dynamic_cast<KhronosObjectAttributes*>(attrs_ptr.get());
+  // the frontend's temp pointers live on the UNMERGED graph (the merged copy of an
+  // archived node is never refreshed by mergeGraph, so it can't be trusted for
+  // bookkeeping); rename on disk and mirror the final path onto the merged copy,
+  // where it sticks precisely because archived attributes are never overwritten
+  for (const auto& [node_id, node] : unmerged.getLayer(config.layer).nodes()) {
+    const auto* khronos = node->tryAttributes<KhronosObjectAttributes>();
     if (!khronos || khronos->image_folder.empty()) {
       continue;
     }
+    const auto final_path = finalImagePath(images_root, node_id);
     const std::filesystem::path current(khronos->image_folder);
-    if (current.string().find("/temp/") == std::string::npos) {
-      continue;  // already renamed
+    if (current.string().find("/temp/") != std::string::npos) {
+      moveImageFiles(current, final_path);
     }
-    NodeSymbol sym(node_id);
-    const auto final_path = images_root / (std::string(1, sym.category()) + "_" +
-                                           std::to_string(sym.categoryId()));
-    moveImageFiles(current, final_path);
-    khronos->image_folder = final_path.string();
+
+    const auto target_node = dsg.graph->findNode(node_id);
+    if (!target_node) {
+      continue;
+    }
+    const auto* target_attrs = target_node->tryAttributes<KhronosObjectAttributes>();
+    if (!target_attrs || target_attrs->image_folder == final_path.string()) {
+      continue;
+    }
+    auto attrs_ptr = target_node->attributes().clone();
+    dynamic_cast<KhronosObjectAttributes*>(attrs_ptr.get())->image_folder =
+        final_path.string();
     dsg.graph->setNodeAttributes(node_id, std::move(attrs_ptr));
   }
 }
