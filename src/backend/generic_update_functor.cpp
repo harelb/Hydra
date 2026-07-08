@@ -64,14 +64,17 @@ void moveImageFiles(const std::filesystem::path& src,
   if (!std::filesystem::exists(dest)) {
     std::filesystem::create_directories(dest);
   }
+  size_t moved = 0;
   for (const auto& entry : std::filesystem::directory_iterator(src)) {
     try {
       std::filesystem::rename(entry.path(), dest / entry.path().filename());
+      ++moved;
     } catch (const std::exception& e) {
       LOG(WARNING) << "[GenericUpdateFunctor] failed to move " << entry.path() << ": "
                    << e.what();
     }
   }
+  LOG(INFO) << "[image-union] moved " << moved << " files " << src << " -> " << dest;
   try {
     std::filesystem::remove(src);
   } catch (...) {
@@ -99,16 +102,22 @@ NodeAttributes::Ptr mergeKhronosImageFolders(const DynamicSceneGraph& graph,
   auto attrs_ptr = graph.getNode(nodes[0]).attributes().clone();
   auto* surviving = dynamic_cast<KhronosObjectAttributes*>(attrs_ptr.get());
   if (!surviving) {
+    LOG(INFO) << "[image-union] " << NodeSymbol(nodes[0]).str()
+              << ": attrs are not KhronosObjectAttributes, skipping";
     return attrs_ptr;
   }
 
   const char* output_dir_env = std::getenv("ADT4_OUTPUT_DIR");
   if (!output_dir_env) {
+    LOG(INFO) << "[image-union] ADT4_OUTPUT_DIR unset, skipping";
     return attrs_ptr;
   }
   const std::filesystem::path images_root =
       std::filesystem::path(output_dir_env) / "images";
   const auto dest = finalImagePath(images_root, nodes[0]);
+  LOG(INFO) << "[image-union] parent=" << NodeSymbol(nodes[0]).str()
+            << " children=" << (nodes.size() - 1) << " dest=" << dest
+            << " dest_exists=" << std::filesystem::exists(dest);
 
   // covers a merge that lands before call() renamed the surviving node's temp dir
   if (!surviving->image_folder.empty()) {
@@ -119,7 +128,12 @@ NodeAttributes::Ptr mergeKhronosImageFolders(const DynamicSceneGraph& graph,
     if (from && !from->image_folder.empty()) {
       moveImageFiles(std::filesystem::path(from->image_folder), dest);
     }
-    moveImageFiles(finalImagePath(images_root, nodes[i]), dest);
+    const auto child_final = finalImagePath(images_root, nodes[i]);
+    LOG(INFO) << "[image-union]   child=" << NodeSymbol(nodes[i]).str()
+              << " attr=" << (from ? from->image_folder : "<not-khronos>")
+              << " final=" << child_final
+              << " final_exists=" << std::filesystem::exists(child_final);
+    moveImageFiles(child_final, dest);
   }
 
   if (std::filesystem::exists(dest)) {

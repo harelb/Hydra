@@ -221,6 +221,47 @@ TEST(GenericUpdateFunctor, mergeUnionsImageFoldersFromFinalPaths) {
   EXPECT_TRUE(std::filesystem::exists(images_root / "O_0" / "crop_b.png"));
 }
 
+// Same union, but through the full live path: MergeTracker::applyMerges on a merged
+// graph with the functor's hook, exactly as DsgUpdater::callUpdateFunctions drives it.
+TEST(GenericUpdateFunctor, mergeUnionsImageFoldersViaMergeTracker) {
+  ScopedOutputDir tmp("tracker");
+  const auto images_root = tmp.path / "images";
+  writeFile(images_root / "O_0" / "crop_a.png");
+  writeFile(images_root / "O_1" / "crop_b.png");
+
+  auto dsg = test::makeSharedDsg();
+  auto& merged = *dsg->graph;
+  merged.emplaceNode(DsgLayers::OBJECTS,
+                     NodeSymbol('O', 0),
+                     makeObject((images_root / "O_0").string()));
+  merged.emplaceNode(DsgLayers::OBJECTS,
+                     NodeSymbol('O', 1),
+                     makeObject((images_root / "O_1").string()));
+
+  // odometric source graph still carries the stale temp paths
+  const auto unmerged = merged.clone();
+  unmerged->getNode(NodeSymbol('O', 0)).attributes<KhronosObjectAttributes>().image_folder =
+      (images_root / "temp" / "O_0").string();
+  unmerged->getNode(NodeSymbol('O', 1)).attributes<KhronosObjectAttributes>().image_folder =
+      (images_root / "temp" / "O_1").string();
+
+  GenericUpdateFunctor functor(defaultConfig());
+  const auto hooks = functor.hooks();
+  ASSERT_TRUE(hooks.merge != nullptr);
+
+  MergeTracker tracker;
+  MergeList proposals{{NodeSymbol('O', 1), NodeSymbol('O', 0)}};
+  const auto applied = tracker.applyMerges(*unmerged, proposals, *dsg, hooks.merge);
+  EXPECT_EQ(applied, 1u);
+
+  const auto& attrs =
+      merged.getNode(NodeSymbol('O', 0)).attributes<KhronosObjectAttributes>();
+  EXPECT_EQ(attrs.image_folder, (images_root / "O_0").string());
+  EXPECT_TRUE(std::filesystem::exists(images_root / "O_0" / "crop_a.png"));
+  EXPECT_TRUE(std::filesystem::exists(images_root / "O_0" / "crop_b.png"));
+  EXPECT_FALSE(std::filesystem::exists(images_root / "O_1"));
+}
+
 // A child that never produced crops must not invent folders, and a surviving node
 // with no crops of its own still adopts the union of its children.
 TEST(GenericUpdateFunctor, mergeUnionsImageFoldersChildOnly) {

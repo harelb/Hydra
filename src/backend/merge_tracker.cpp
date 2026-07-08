@@ -71,12 +71,18 @@ size_t MergeTracker::applyMerges(const DynamicSceneGraph& unmerged,
   }
 
   if (!merge_attrs) {
+    VLOG_IF(1, num_applied > 0)
+        << "[merge-tracker] applied=" << num_applied << " but no merge_attrs hook";
     return num_applied;
   }
 
+  VLOG_IF(1, !to_update.empty())
+      << "[merge-tracker] applied=" << num_applied
+      << " to_update=" << to_update.size();
   for (const auto& node : to_update) {
     auto iter = merge_sets_.find(node);
     if (iter == merge_sets_.end()) {
+      VLOG(1) << "[merge-tracker] no merge set for " << NodeSymbol(node).str();
       continue;
     }
 
@@ -100,6 +106,9 @@ size_t MergeTracker::applyMerges(const DynamicSceneGraph& unmerged,
 void MergeTracker::updateAllMergeAttributes(const DynamicSceneGraph& unmerged,
                                             DynamicSceneGraph& merged,
                                             const MergeFunc& merge_attrs) {
+  VLOG_IF(1, !merge_sets_.empty())
+      << "[merge-tracker] updateAllMergeAttributes over " << merge_sets_.size()
+      << " merge sets";
   for (auto& [parent, children] : merge_sets_) {
     auto child_iter = children.begin();
     while (child_iter != children.end()) {
