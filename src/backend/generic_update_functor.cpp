@@ -58,7 +58,7 @@ using spark_dsg::NodeSymbol;
 
 void moveImageFiles(const std::filesystem::path& src,
                     const std::filesystem::path& dest) {
-  if (!std::filesystem::exists(src)) {
+  if (src == dest || !std::filesystem::exists(src)) {
     return;
   }
   if (!std::filesystem::exists(dest)) {
@@ -78,7 +78,19 @@ void moveImageFiles(const std::filesystem::path& src,
   }
 }
 
+// Final crop directory for a node, matching the temp->final rename in call().
+std::filesystem::path finalImagePath(const std::filesystem::path& images_root,
+                                     NodeId node) {
+  const NodeSymbol sym(node);
+  return images_root /
+         (std::string(1, sym.category()) + "_" + std::to_string(sym.categoryId()));
+}
+
 // Consolidate image folders when nodes merge. nodes[0] is the surviving node.
+// The attributes come from the odometric unmerged graph, whose image_folder paths
+// still point at the frontend's temp dirs (only the merged graph sees the temp->final
+// rename in call()); the crops actually live at each node's final path, so the union
+// works on those and the stale pointer is rewritten to the surviving node's final path.
 NodeAttributes::Ptr mergeKhronosImageFolders(const DynamicSceneGraph& graph,
                                              const std::vector<NodeId>& nodes) {
   if (nodes.empty()) {
@@ -86,21 +98,32 @@ NodeAttributes::Ptr mergeKhronosImageFolders(const DynamicSceneGraph& graph,
   }
   auto attrs_ptr = graph.getNode(nodes[0]).attributes().clone();
   auto* surviving = dynamic_cast<KhronosObjectAttributes*>(attrs_ptr.get());
+  if (!surviving) {
+    return attrs_ptr;
+  }
 
+  const char* output_dir_env = std::getenv("ADT4_OUTPUT_DIR");
+  if (!output_dir_env) {
+    return attrs_ptr;
+  }
+  const std::filesystem::path images_root =
+      std::filesystem::path(output_dir_env) / "images";
+  const auto dest = finalImagePath(images_root, nodes[0]);
+
+  // covers a merge that lands before call() renamed the surviving node's temp dir
+  if (!surviving->image_folder.empty()) {
+    moveImageFiles(std::filesystem::path(surviving->image_folder), dest);
+  }
   for (size_t i = 1; i < nodes.size(); ++i) {
     const auto* from = graph.getNode(nodes[i]).tryAttributes<KhronosObjectAttributes>();
-    if (!from || from->image_folder.empty()) {
-      continue;
+    if (from && !from->image_folder.empty()) {
+      moveImageFiles(std::filesystem::path(from->image_folder), dest);
     }
-    if (!surviving) {
-      break;
-    }
-    if (surviving->image_folder.empty()) {
-      surviving->image_folder = from->image_folder;
-    } else {
-      moveImageFiles(std::filesystem::path(from->image_folder),
-                     std::filesystem::path(surviving->image_folder));
-    }
+    moveImageFiles(finalImagePath(images_root, nodes[i]), dest);
+  }
+
+  if (std::filesystem::exists(dest)) {
+    surviving->image_folder = dest.string();
   }
   return attrs_ptr;
 }

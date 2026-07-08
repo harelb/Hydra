@@ -38,11 +38,20 @@
 #include <gtest/gtest.h>
 #include <hydra/backend/generic_update_functor.h>
 #include <kimera_pgmo/deformation_graph.h>
+#include <spark_dsg/node_attributes.h>
+#include <spark_dsg/node_symbol.h>
+
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 
 #include "hydra_test/resources.h"
 #include "hydra_test/shared_dsg_fixture.h"
 
 namespace hydra {
+
+using spark_dsg::KhronosObjectAttributes;
+using spark_dsg::NodeSymbol;
 
 namespace {
 
@@ -61,6 +70,43 @@ MergeList callWithUnmerged(const UpdateFunctor& functor,
 }
 
 GenericUpdateFunctor::Config defaultConfig() { return {5, "OBJECTS"}; }
+
+// A throwaway directory that cleans itself up, exported as $ADT4_OUTPUT_DIR for the
+// duration of a test.
+struct ScopedOutputDir {
+  std::filesystem::path path;
+  std::string previous;
+  bool had_previous;
+  explicit ScopedOutputDir(const std::string& name)
+      : path(std::filesystem::temp_directory_path() / ("hydra_merge_images_" + name)) {
+    std::filesystem::remove_all(path);
+    std::filesystem::create_directories(path);
+    const char* prev = std::getenv("ADT4_OUTPUT_DIR");
+    had_previous = prev != nullptr;
+    previous = prev ? prev : "";
+    setenv("ADT4_OUTPUT_DIR", path.string().c_str(), 1);
+  }
+  ~ScopedOutputDir() {
+    if (had_previous) {
+      setenv("ADT4_OUTPUT_DIR", previous.c_str(), 1);
+    } else {
+      unsetenv("ADT4_OUTPUT_DIR");
+    }
+    std::filesystem::remove_all(path);
+  }
+};
+
+void writeFile(const std::filesystem::path& p) {
+  std::filesystem::create_directories(p.parent_path());
+  std::ofstream(p) << "{}\n";
+}
+
+std::unique_ptr<KhronosObjectAttributes> makeObject(const std::string& image_folder) {
+  auto attrs = std::make_unique<KhronosObjectAttributes>();
+  attrs->position << 0.0, 0.0, 0.0;
+  attrs->image_folder = image_folder;
+  return attrs;
+}
 
 }  // namespace
 
@@ -129,6 +175,82 @@ TEST(GenericUpdateFunctor, shouldUpdate) {
   unmerged->getNode(0).attributes().is_active = false;
   functor.call(*unmerged, *dsg, info);
   EXPECT_NEAR(0.0, (expected - result.position).norm(), 1.0e-7);
+}
+
+// The merge hook receives the odometric unmerged graph, whose image_folder attributes
+// still point at the frontend's temp dirs; those dirs no longer exist because call()
+// already moved the crops to the per-node final path <output>/images/<layer>_<id>.
+// The union has to happen between the on-disk final dirs, not the stale attrs.
+TEST(GenericUpdateFunctor, mergeUnionsImageFoldersFromFinalPaths) {
+  ScopedOutputDir tmp("union");
+  const auto images_root = tmp.path / "images";
+  writeFile(images_root / "O_0" / "crop_a.png");
+  writeFile(images_root / "O_1" / "crop_b.png");
+
+  auto dsg = test::makeSharedDsg();
+  auto& unmerged = *dsg->graph;  // plays the odometric source graph
+  unmerged.emplaceNode(DsgLayers::OBJECTS,
+                       NodeSymbol('O', 0),
+                       makeObject((images_root / "temp" / "uuid0").string()));
+  unmerged.emplaceNode(DsgLayers::OBJECTS,
+                       NodeSymbol('O', 1),
+                       makeObject((images_root / "temp" / "uuid1").string()));
+
+  GenericUpdateFunctor functor(defaultConfig());
+  const auto hooks = functor.hooks();
+  ASSERT_TRUE(hooks.merge != nullptr);
+
+  const std::vector<NodeId> nodes{NodeSymbol('O', 0), NodeSymbol('O', 1)};
+  auto attrs = hooks.merge(unmerged, nodes);
+  ASSERT_TRUE(attrs != nullptr);
+  const auto* merged = dynamic_cast<const KhronosObjectAttributes*>(attrs.get());
+  ASSERT_TRUE(merged != nullptr);
+
+  EXPECT_EQ(merged->image_folder, (images_root / "O_0").string());
+  EXPECT_TRUE(std::filesystem::exists(images_root / "O_0" / "crop_a.png"));
+  EXPECT_TRUE(std::filesystem::exists(images_root / "O_0" / "crop_b.png"));
+  EXPECT_FALSE(std::filesystem::exists(images_root / "O_1"));
+
+  // updateAllMergeAttributes re-invokes the hook for every merge set on each loop
+  // closure, so a second call must be a stable no-op
+  auto attrs2 = hooks.merge(unmerged, nodes);
+  const auto* merged2 = dynamic_cast<const KhronosObjectAttributes*>(attrs2.get());
+  ASSERT_TRUE(merged2 != nullptr);
+  EXPECT_EQ(merged2->image_folder, (images_root / "O_0").string());
+  EXPECT_TRUE(std::filesystem::exists(images_root / "O_0" / "crop_a.png"));
+  EXPECT_TRUE(std::filesystem::exists(images_root / "O_0" / "crop_b.png"));
+}
+
+// A child that never produced crops must not invent folders, and a surviving node
+// with no crops of its own still adopts the union of its children.
+TEST(GenericUpdateFunctor, mergeUnionsImageFoldersChildOnly) {
+  ScopedOutputDir tmp("child_only");
+  const auto images_root = tmp.path / "images";
+  writeFile(images_root / "O_1" / "crop_b.png");
+
+  auto dsg = test::makeSharedDsg();
+  auto& unmerged = *dsg->graph;
+  unmerged.emplaceNode(DsgLayers::OBJECTS, NodeSymbol('O', 0), makeObject(""));
+  unmerged.emplaceNode(
+      DsgLayers::OBJECTS,
+      NodeSymbol('O', 1),
+      makeObject((images_root / "temp" / "uuid1").string()));
+  unmerged.emplaceNode(DsgLayers::OBJECTS, NodeSymbol('O', 2), makeObject(""));
+
+  GenericUpdateFunctor functor(defaultConfig());
+  const auto hooks = functor.hooks();
+  ASSERT_TRUE(hooks.merge != nullptr);
+
+  const std::vector<NodeId> nodes{
+      NodeSymbol('O', 0), NodeSymbol('O', 1), NodeSymbol('O', 2)};
+  auto attrs = hooks.merge(unmerged, nodes);
+  const auto* merged = dynamic_cast<const KhronosObjectAttributes*>(attrs.get());
+  ASSERT_TRUE(merged != nullptr);
+
+  EXPECT_EQ(merged->image_folder, (images_root / "O_0").string());
+  EXPECT_TRUE(std::filesystem::exists(images_root / "O_0" / "crop_b.png"));
+  EXPECT_FALSE(std::filesystem::exists(images_root / "O_1"));
+  EXPECT_FALSE(std::filesystem::exists(images_root / "O_2"));
 }
 
 }  // namespace hydra
