@@ -99,7 +99,13 @@ NodeAttributes::Ptr mergeKhronosImageFolders(const DynamicSceneGraph& graph,
   if (nodes.empty()) {
     return nullptr;
   }
-  auto attrs_ptr = graph.getNode(nodes[0]).attributes().clone();
+  const auto parent = graph.findNode(nodes[0]);
+  if (!parent) {
+    // the frontend deleted the surviving node from the odometric graph; nothing to
+    // rebuild the merged attributes from
+    return nullptr;
+  }
+  auto attrs_ptr = parent->attributes().clone();
   auto* surviving = dynamic_cast<KhronosObjectAttributes*>(attrs_ptr.get());
   if (!surviving) {
     LOG(INFO) << "[image-union] " << NodeSymbol(nodes[0]).str()
@@ -124,7 +130,8 @@ NodeAttributes::Ptr mergeKhronosImageFolders(const DynamicSceneGraph& graph,
     moveImageFiles(std::filesystem::path(surviving->image_folder), dest);
   }
   for (size_t i = 1; i < nodes.size(); ++i) {
-    const auto* from = graph.getNode(nodes[i]).tryAttributes<KhronosObjectAttributes>();
+    const auto child = graph.findNode(nodes[i]);
+    const auto* from = child ? child->tryAttributes<KhronosObjectAttributes>() : nullptr;
     if (from && !from->image_folder.empty()) {
       moveImageFiles(std::filesystem::path(from->image_folder), dest);
     }

@@ -262,6 +262,43 @@ TEST(GenericUpdateFunctor, mergeUnionsImageFoldersViaMergeTracker) {
   EXPECT_FALSE(std::filesystem::exists(images_root / "O_1"));
 }
 
+// The frontend can DELETE object nodes (GraphUpdater delete updates), so a merge
+// parent recorded in the tracker may vanish from the odometric unmerged graph. The
+// tracker must drop that merge set instead of letting the hook throw std::out_of_range
+// (live crash in box_8: "missing node 'O(15)'" inside updateAllMergeAttributes).
+TEST(GenericUpdateFunctor, mergeTrackerSurvivesDeletedParent) {
+  ScopedOutputDir tmp("deleted_parent");
+  const auto images_root = tmp.path / "images";
+  writeFile(images_root / "O_0" / "crop_a.png");
+  writeFile(images_root / "O_1" / "crop_b.png");
+
+  auto dsg = test::makeSharedDsg();
+  auto& merged = *dsg->graph;
+  merged.emplaceNode(DsgLayers::OBJECTS,
+                     NodeSymbol('O', 0),
+                     makeObject((images_root / "O_0").string()));
+  merged.emplaceNode(DsgLayers::OBJECTS,
+                     NodeSymbol('O', 1),
+                     makeObject((images_root / "O_1").string()));
+  const auto unmerged = merged.clone();
+
+  GenericUpdateFunctor functor(defaultConfig());
+  const auto hooks = functor.hooks();
+  ASSERT_TRUE(hooks.merge != nullptr);
+
+  MergeTracker tracker;
+  MergeList proposals{{NodeSymbol('O', 1), NodeSymbol('O', 0)}};
+  ASSERT_EQ(tracker.applyMerges(*unmerged, proposals, *dsg, hooks.merge), 1u);
+
+  // frontend deletes the surviving node from the odometric graph
+  unmerged->removeNode(NodeSymbol('O', 0));
+
+  // both entry points must not throw and must drop the stale merge set
+  EXPECT_NO_THROW(tracker.updateAllMergeAttributes(*unmerged, merged, hooks.merge));
+  MergeList repeat{{NodeSymbol('O', 1), NodeSymbol('O', 0)}};
+  EXPECT_NO_THROW(tracker.applyMerges(*unmerged, repeat, *dsg, hooks.merge));
+}
+
 // A child that never produced crops must not invent folders, and a surviving node
 // with no crops of its own still adopts the union of its children.
 TEST(GenericUpdateFunctor, mergeUnionsImageFoldersChildOnly) {
