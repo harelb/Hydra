@@ -57,6 +57,7 @@ add_library(
   src/places/gvd_visualization_utilities.cpp
   src/odometry/ros_pose_graph_tracker.cpp
   src/openset/ros_embedding_group.cpp
+  src/utils/async_graph_publisher.cpp
   src/utils/node_plugins.cpp
   src/utils/change_gate.cpp
   src/utils/dsg_streaming_interface.cpp
@@ -110,7 +111,7 @@ rclcpp_components_register_node(
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest)
-  ament_add_gtest(test_${PROJECT_NAME} tests/main.cpp tests/test_change_gate.cpp tests/test_ros_sensors.cpp
+  ament_add_gtest(test_${PROJECT_NAME} tests/main.cpp tests/test_async_graph_publisher.cpp tests/test_change_gate.cpp tests/test_ros_sensors.cpp
                   tests/test_sub_keyframe_module.cpp)
   target_link_libraries(test_${PROJECT_NAME} ${PROJECT_NAME} gflags)
 endif()
