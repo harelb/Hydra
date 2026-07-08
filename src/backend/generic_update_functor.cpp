@@ -36,10 +36,11 @@
 
 #include <config_utilities/config.h>
 #include <config_utilities/validation.h>
-#include <filesystem>
 #include <glog/logging.h>
 #include <spark_dsg/node_attributes.h>
 #include <spark_dsg/scene_graph_types.h>
+
+#include <filesystem>
 
 #include "hydra/utils/timing_utilities.h"
 
@@ -55,7 +56,8 @@ static const auto registration =
 using spark_dsg::KhronosObjectAttributes;
 using spark_dsg::NodeSymbol;
 
-void moveImageFiles(const std::filesystem::path& src, const std::filesystem::path& dest) {
+void moveImageFiles(const std::filesystem::path& src,
+                    const std::filesystem::path& dest) {
   if (!std::filesystem::exists(src)) {
     return;
   }
@@ -66,7 +68,8 @@ void moveImageFiles(const std::filesystem::path& src, const std::filesystem::pat
     try {
       std::filesystem::rename(entry.path(), dest / entry.path().filename());
     } catch (const std::exception& e) {
-      LOG(WARNING) << "[GenericUpdateFunctor] failed to move " << entry.path() << ": " << e.what();
+      LOG(WARNING) << "[GenericUpdateFunctor] failed to move " << entry.path() << ": "
+                   << e.what();
     }
   }
   try {
@@ -85,8 +88,7 @@ NodeAttributes::Ptr mergeKhronosImageFolders(const DynamicSceneGraph& graph,
   auto* surviving = dynamic_cast<KhronosObjectAttributes*>(attrs_ptr.get());
 
   for (size_t i = 1; i < nodes.size(); ++i) {
-    const auto* from =
-        graph.getNode(nodes[i]).tryAttributes<KhronosObjectAttributes>();
+    const auto* from = graph.getNode(nodes[i]).tryAttributes<KhronosObjectAttributes>();
     if (!from || from->image_folder.empty()) {
       continue;
     }
@@ -134,8 +136,15 @@ UpdateFunctor::Hooks GenericUpdateFunctor::hooks() const {
     };
 
     if (config.layer == spark_dsg::DsgLayers::OBJECTS) {
-      my_hooks.merge = [](const auto& graph, const auto& nodes) {
-        return mergeKhronosImageFolders(graph, nodes);
+      my_hooks.merge = [this](const auto& graph, const auto& nodes) {
+        auto attrs = mergeKhronosImageFolders(graph, nodes);
+        if (attrs) {
+          // the merged attributes are cloned from the odometric unmerged graph;
+          // re-apply the surviving node's last deformation so the merge result
+          // stays in the optimized frame
+          deformation_interpolator.applyLastTransform(nodes.front(), *attrs);
+        }
+        return attrs;
       };
     }
   }
@@ -184,9 +193,8 @@ void GenericUpdateFunctor::call(const DynamicSceneGraph& unmerged,
       continue;  // already renamed
     }
     NodeSymbol sym(node_id);
-    const auto final_path =
-        images_root /
-        (std::string(1, sym.category()) + "_" + std::to_string(sym.categoryId()));
+    const auto final_path = images_root / (std::string(1, sym.category()) + "_" +
+                                           std::to_string(sym.categoryId()));
     moveImageFiles(current, final_path);
     khronos->image_folder = final_path.string();
     dsg.graph->setNodeAttributes(node_id, std::move(attrs_ptr));
