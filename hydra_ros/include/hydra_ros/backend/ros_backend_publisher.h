@@ -41,6 +41,8 @@
 #include <rclcpp/publisher.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 
+#include "hydra_ros/utils/async_graph_publisher.h"
+#include "hydra_ros/utils/change_gate.h"
 #include "hydra_ros/utils/dsg_streaming_interface.h"
 
 namespace hydra {
@@ -50,6 +52,10 @@ class RosBackendPublisher : public BackendModule::Sink {
   struct Config {
     //! @brief Configuration for dsg publisher
     DsgSender::Config dsg_sender;
+    //! @brief Gate full-DSG publishes on accumulated change since last publish
+    ChangeGate::Config change_gate;
+    //! @brief Serialize+publish the gated DSG on a worker thread
+    bool enable_async_publish = true;
     //! @brief Publish odom to map transform
     bool publish_backend_tf = false;
     //! @brief Frame to use when publishing map_T_robot. An empty frame disables
@@ -95,6 +101,8 @@ class RosBackendPublisher : public BackendModule::Sink {
   pose_graph_tools::PoseGraphPublisher pose_graph_pub_;
   pose_graph_tools::PoseGraphPublisher mesh_graph_pub_;
   std::unique_ptr<DsgSender> dsg_sender_;
+  mutable ChangeGate change_gate_;
+  std::unique_ptr<AsyncGraphPublisher> async_publisher_;
   mutable tf2_ros::TransformBroadcaster tf_br_;
 };
 

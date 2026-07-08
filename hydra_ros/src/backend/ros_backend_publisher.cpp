@@ -72,6 +72,8 @@ void declare_config(RosBackendPublisher::Config& config) {
   using namespace config;
   name("RosBackendPublisher::Config");
   field(config.dsg_sender, "");
+  field(config.change_gate, "change_gate");
+  field(config.enable_async_publish, "enable_async_publish");
   field(config.publish_backend_tf, "publish_backend_tf");
   field(config.tf_pub_robot_frame, "tf_pub_robot_frame");
   field(config.tf_pub_map_frame, "tf_pub_map_frame");
@@ -79,19 +81,37 @@ void declare_config(RosBackendPublisher::Config& config) {
 }
 
 RosBackendPublisher::RosBackendPublisher(ianvs::NodeHandle nh)
-    : config(config::checkValid(get_config())), nh_(nh), tf_br_(nh_.node()) {
+    : config(config::checkValid(get_config())),
+      nh_(nh),
+      change_gate_(config.change_gate),
+      tf_br_(nh_.node()) {
   mesh_mesh_edges_pub_ = nh.create_publisher<Marker>("deformation_graph_mesh_mesh", 10);
   pose_mesh_edges_pub_ = nh.create_publisher<Marker>("deformation_graph_pose_mesh", 10);
   pose_graph_pub_ = nh.create_publisher<PoseGraphTypeAdapter>("pose_graph", 10);
   mesh_graph_pub_ = nh.create_publisher<PoseGraphTypeAdapter>("mesh_graph", 10);
   dsg_sender_ = std::make_unique<DsgSender>(config.dsg_sender, nh);
+  if (config.enable_async_publish) {
+    async_publisher_ = std::make_unique<AsyncGraphPublisher>(
+        [this](const DynamicSceneGraph& snapshot, uint64_t snapshot_ts) {
+          dsg_sender_->sendGraph(snapshot, rclcpp::Time(snapshot_ts));
+        });
+  }
 }
 
 void RosBackendPublisher::call(uint64_t timestamp_ns,
                                const SceneGraph& graph,
                                const DeformationGraph& dgraph) const {
   const rclcpp::Time stamp(timestamp_ns);
-  dsg_sender_->sendGraph(graph, stamp);
+  if (change_gate_.shouldPublish(graph, timestamp_ns)) {
+    if (async_publisher_) {
+      // clone() deep-copies attributes and mesh, so the worker serializes a stable
+      // snapshot while the backend keeps mutating the live graph
+      async_publisher_->submit(graph.clone(), timestamp_ns);
+    } else {
+      dsg_sender_->sendGraph(graph, stamp);
+    }
+    change_gate_.notePublished(graph, timestamp_ns);
+  }
 
   if (pose_graph_pub_->get_subscription_count()) {
     publishPoseGraph(graph, dgraph, timestamp_ns);
