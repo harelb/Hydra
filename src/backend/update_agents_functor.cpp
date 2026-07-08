@@ -41,6 +41,7 @@
 
 #include <iomanip>
 
+#include "hydra/backend/backend_utilities.h"
 #include "hydra/utils/printing.h"
 #include "hydra/utils/timing_utilities.h"
 
@@ -79,26 +80,32 @@ void UpdateAgentsFunctor::call(const DynamicSceneGraph&,
   for (const auto& [prefix, layer] : graph.layer_partition(desired_layer)) {
     std::set<NodeId> missing_nodes;
     for (const auto& [node_id, node] : layer->nodes()) {
-      auto& attrs = node->attributes<AgentNodeAttributes>();
-      if (!info->pgmo_values->exists(attrs.external_key)) {
+      // Layer 2 also hosts sub-keyframe nodes (partition 's'), whose attributes
+      // are not AgentNodeAttributes. Skip anything that is not a real agent node
+      // instead of throwing std::bad_cast on the downcast.
+      auto* attrs = node->tryAttributes<AgentNodeAttributes>();
+      if (!attrs) {
+        continue;  // skip non-agent nodes sharing layer 2 (e.g. sub-keyframes)
+      }
+      if (!info->pgmo_values->exists(attrs->external_key)) {
         missing_nodes.insert(node->id);
         continue;
       }
 
-      const auto p_prev = attrs.position;
-      const auto q_prev = attrs.world_R_body;
+      const auto p_prev = attrs->position;
+      const auto q_prev = attrs->world_R_body;
       const gtsam::Pose3 prev_pose(gtsam::Rot3(q_prev), p_prev);
-      auto pose = info->pgmo_values->at<gtsam::Pose3>(attrs.external_key);
-      attrs.position = pose.translation();
-      attrs.world_R_body = Eigen::Quaterniond(pose.rotation().matrix());
+      auto pose = info->pgmo_values->at<gtsam::Pose3>(attrs->external_key);
+      attrs->position = pose.translation();
+      attrs->world_R_body = Eigen::Quaterniond(pose.rotation().matrix());
 
       const auto diff = prev_pose.between(pose);
       const auto q_diff = Eigen::Quaterniond(diff.rotation().matrix());
       const auto p_diff = diff.translation();
       VLOG(10) << "Updating agent " << NodeSymbol(node->id).str() << " pose from "
-               << NodeSymbol(attrs.external_key).str() << ":"
+               << NodeSymbol(attrs->external_key).str() << ":"
                << "\n - original: " << toString(q_prev, p_prev)
-               << "\n - new:      " << toString(attrs.world_R_body, attrs.position)
+               << "\n - new:      " << toString(attrs->world_R_body, attrs->position)
                << "\n - diff:     " << toString(q_diff, p_diff);
     }
 
@@ -108,6 +115,12 @@ void UpdateAgentsFunctor::call(const DynamicSceneGraph&,
                    << displayNodeSymbolContainer(missing_nodes);
     }
   }
+
+  // Mirror the object image_folder handling: the merge into the backend graph skips
+  // attribute updates for archived agent nodes, so a keyframe extracted after its node
+  // archived never gets its image_folder. Restore it from the on-disk keyframe files
+  // (keyed on the node timestamp) so the backend graph stays consistent with objects.
+  utils::reconcileAgentImageFolders(graph);
 }
 
 }  // namespace hydra

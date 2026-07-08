@@ -57,6 +57,7 @@
 #include "hydra/frontend/surface_place_extractor.h"
 #include "hydra/frontend/traversability_place_extractor.h"
 #include "hydra/frontend/view_database.h"
+#include "hydra/frontend/agent_image_extractor.h"
 #include "hydra/loop_closure/lcd_input.h"
 #include "hydra/odometry/pose_graph_from_odom.h"
 #include "hydra/utils/logging.h"
@@ -102,6 +103,11 @@ class GraphBuilder : public Module {
     bool no_packet_collation = false;
     //! @brief Drop object meshes for memory savings
     bool clear_object_meshes = false;
+    
+    AgentImageExtractor::Config agent_image_extractor;
+    //! @brief Max acceptable spatial distance (m) between a sub-keyframe and
+    //! its temporally-nearest agent anchor
+    double subkeyframe_anchor_max_dist_m = 2.0;
   } const config;
 
   GraphBuilder(const Config& config,
@@ -154,6 +160,11 @@ class GraphBuilder : public Module {
 
   void updatePoseGraph(const ActiveWindowOutput& msg);
 
+  //! Drain SubKeyframeModule requests and create sub-keyframe nodes. Runs on the
+  //! frontend spin thread (this class' thread) so all frontend-DSG mutation stays
+  //! single-threaded; the SubKeyframeModule only hands off requests via a queue.
+  void updateSubKeyframes();
+
  protected:
   void assignBowVectors();
 
@@ -190,11 +201,15 @@ class GraphBuilder : public Module {
   std::unique_ptr<places::TraversabilityPlaceExtractor> traversability_places_;
   std::unique_ptr<GvdPlaceExtractor> freespace_places_;
   std::unique_ptr<FrontierExtractor> frontier_places_;
+  std::unique_ptr<AgentImageExtractor> agent_extractor_;
   ViewDatabase view_database_;
 
   SceneGraphLogger frontend_graph_logger_;
   MessageQueue<PoseGraphPacket> pose_graph_updates_;
   std::list<pose_graph_tools::BowQuery::ConstPtr> cached_bow_messages_;
+
+  //! Monotonically increasing index for sub-keyframe node symbols ('s', idx).
+  size_t sub_index_ = 0;
 
   Sink::List sinks_;
 

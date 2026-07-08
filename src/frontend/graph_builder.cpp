@@ -43,6 +43,7 @@
 #include <kimera_pgmo/utils/common_functions.h>
 #include <kimera_pgmo/utils/mesh_io.h>
 #include <spark_dsg/node_attributes.h>
+#include <spark_dsg/node_symbol.h>
 #include <spark_dsg/printing.h>
 
 #include "hydra/common/global_info.h"
@@ -50,6 +51,7 @@
 #include "hydra/common/pipeline_queues.h"
 #include "hydra/frontend/frontier_extractor.h"
 #include "hydra/frontend/mesh_segmenter.h"
+#include "hydra/frontend/subkeyframe_anchor.h"
 #include "hydra/utils/pgmo_mesh_interface.h"
 #include "hydra/utils/pgmo_mesh_traits.h"  // IWYU pragma: keep
 #include "hydra/utils/printing.h"
@@ -104,6 +106,9 @@ void declare_config(GraphBuilder::Config& config) {
   field(config.sinks, "sinks");
   field(config.no_packet_collation, "no_packet_collation");
   field(config.clear_object_meshes, "clear_object_meshes");
+
+  field(config.agent_image_extractor, "agent_extractor");
+  field(config.subkeyframe_anchor_max_dist_m, "subkeyframe_anchor_max_dist_m");
 }
 
 GraphBuilder::GraphBuilder(const Config& config,
@@ -119,16 +124,18 @@ GraphBuilder::GraphBuilder(const Config& config,
       map_window_(GlobalInfo::instance().createVolumetricWindow()),
       tracker_(config.pose_graph_tracker.create()),
       surface_places_(config.surface_places.create(
-          GlobalInfo::instance().getLabelSpaceConfig().surface_places_labels)),
+          GlobalInfo::instance().labelspace().surface_places_labels)),
       traversability_places_(config.traversability_places.create()),
       freespace_places_(config.freespace_places.create()),
       frontier_places_(config.frontier_places.create()),
+      agent_extractor_(
+          std::make_unique<AgentImageExtractor>(config.agent_image_extractor)),
       view_database_(config.view_database),
       sinks_(Sink::instantiate(config.sinks)) {
   const auto& global_info = GlobalInfo::instance();
   if (config.enable_mesh_objects) {
     segmenter_ = std::make_unique<MeshSegmenter>(
-        config.object_config, global_info.getLabelSpaceConfig().object_labels);
+        config.object_config, global_info.labelspace().object_labels);
   }
 
   CHECK(dsg_ != nullptr);
@@ -346,7 +353,11 @@ void GraphBuilder::spinOnce(const ActiveWindowOutput::Ptr& msg) {
     std::unique_lock<std::mutex> lock(state_->backend_graph->mutex);
     ScopedTimer merge_timer("frontend/merge_graph", msg->timestamp_ns);
     state_->backend_graph->sequence_number = sequence_number_;
-    state_->backend_graph->graph->mergeGraph(*dsg_->graph);
+    // archived nodes still receive attribute updates (e.g. the object extractor's
+    // image_folder lands after the track archives) that the backend must see
+    GraphMergeConfig merge_config;
+    merge_config.update_archived_attributes = true;
+    state_->backend_graph->graph->mergeGraph(*dsg_->graph, merge_config);
   }  // end critical section
 
   if (queues.lcd_queue) {
@@ -419,6 +430,15 @@ void GraphBuilder::updateImpl(const ActiveWindowOutput::Ptr& msg) {
 
   // TODO(nathan) follow up on whether or not we need to do stuff with the 3D places and
   // mesh
+
+  if (agent_extractor_) {
+    agent_extractor_->updateGraph(*dsg_->graph, *msg);
+  }
+
+  // Runs after launchCallbacks (which joins updatePoseGraph), so this spin's
+  // agent anchors already exist. Executes on this (frontend) thread, the only
+  // thread permitted to mutate the frontend DSG.
+  updateSubKeyframes();
 }
 
 void GraphBuilder::updateMesh(const ActiveWindowOutput& input) {
@@ -602,6 +622,67 @@ void GraphBuilder::updatePoseGraph(const ActiveWindowOutput& input) {
   }
 
   assignBowVectors();
+}
+
+void GraphBuilder::updateSubKeyframes() {
+  // Max acceptable spatial distance between a sub-keyframe and the
+  // temporally-nearest agent anchor. The rigid anchor_T_subframe transform's
+  // error scales with (drift/loop_len) * span, so bounding the spatial span
+  // bounds that error. Anchor selection stays temporal (loop-safe: time is
+  // monotonic along the trajectory, so it can't grab an agent from a prior
+  // pass through a revisited location), while the distance bound also
+  // correctly accepts post-stop sub-keyframes, whose temporally-nearest agent
+  // is time-far but spatially ~0 m away.
+  const double kMaxAnchorDistM = config.subkeyframe_anchor_max_dist_m;
+
+  auto& node_queue = PipelineQueues::instance().subkeyframe_node_queue;
+  if (!node_queue) {
+    return;
+  }
+
+  while (!node_queue->empty()) {
+    const auto req = node_queue->pop();
+
+    std::lock_guard<std::mutex> lock(dsg_->mutex);
+
+    // Gather agent anchors from the AGENTS layer (mirrors assignBowVectors and
+    // the former SubKeyframeModule gather).
+    std::vector<AnchorCandidate> anchors;
+    const auto layer_key = dsg_->graph->getLayerKey(DsgLayers::AGENTS);
+    if (layer_key) {
+      const auto& prefix = GlobalInfo::instance().getRobotPrefix();
+      const auto layer = dsg_->graph->findLayer(layer_key->layer, prefix.key);
+      if (layer) {
+        for (const auto& [node_id, node] : layer->nodes()) {
+          const auto* a = node->tryAttributes<AgentNodeAttributes>();
+          if (!a) {
+            continue;
+          }
+          Eigen::Isometry3d world_T_anchor = Eigen::Isometry3d::Identity();
+          world_T_anchor.translation() = a->position;
+          world_T_anchor.linear() = a->world_R_body.toRotationMatrix();
+          anchors.push_back(
+              {node_id, static_cast<uint64_t>(a->timestamp.count()), world_T_anchor});
+        }
+      }
+    }
+
+    const auto anchor_idx = selectNearestAnchor(
+        anchors, req.timestamp_ns, req.world_T_subframe.translation(), kMaxAnchorDistM);
+    if (!anchor_idx) {
+      continue;  // no nearby optimized keyframe yet; drop this request
+    }
+
+    auto attrs = buildSubKeyframeAttrs(anchors[*anchor_idx].id,
+                                       anchors[*anchor_idx].world_T_anchor,
+                                       req.world_T_subframe,
+                                       req.timestamp_ns,
+                                       req.image_folder);
+    dsg_->graph->emplaceNode(2,
+                             NodeSymbol('s', sub_index_++),
+                             std::move(attrs),
+                             static_cast<spark_dsg::PartitionId>('s'));
+  }
 }
 
 void GraphBuilder::assignBowVectors() {

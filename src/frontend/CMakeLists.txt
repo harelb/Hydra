@@ -4,9 +4,13 @@ target_sources(
           ${CMAKE_CURRENT_SOURCE_DIR}/graph_connector.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/gvd_place_extractor.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/frontier_extractor.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/agent_image_extractor.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/keyframe_gate.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/keyframe_writer.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/mesh_delta_clustering.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/mesh_segmenter.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/place_mesh_connector.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/subkeyframe_anchor.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/surface_place_extractor.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/traversability_place_extractor.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/view_database.cpp

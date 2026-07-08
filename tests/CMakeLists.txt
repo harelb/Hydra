@@ -10,6 +10,9 @@ add_executable(
   test_${PROJECT_NAME}
   main.cpp
   src/resources.cpp
+  backend/test_backend_utilities.cpp
+  backend/test_deformation_interpolator.cpp
+  backend/test_dsg_updater.cpp
   backend/test_external_loop_closure.cpp
   backend/test_generic_update_functor.cpp
   backend/test_update_agents_functor.cpp
@@ -17,9 +20,13 @@ add_executable(
   backend/test_update_objects_functor.cpp
   backend/test_update_places_functor.cpp
   common/test_config_utilities.cpp
+  common/test_graph_update.cpp
   common/test_shared_dsg_info.cpp
   frontend/test_graph_connector.cpp
+  frontend/test_keyframe_gate.cpp
+  frontend/test_keyframe_writer.cpp
   frontend/test_mesh_segmenter.cpp
+  frontend/test_subkeyframe_anchor.cpp
   input/test_camera.cpp
   input/test_input_packet.cpp
   input/test_lidar.cpp
@@ -48,6 +55,7 @@ add_executable(
   rooms/test_room_finder.cpp
   rooms/test_room_utilities.cpp
   utils/test_active_window_tracker.cpp
+  utils/test_mesh_utilities.cpp
   utils/test_minimum_spanning_tree.cpp
   utils/test_nearest_neighbor_utilities.cpp
   utils/test_timing_utilities.cpp

@@ -43,6 +43,21 @@ namespace hydra::utils {
 std::optional<uint64_t> getTimeNs(const spark_dsg::DynamicSceneGraph& graph,
                                   gtsam::Symbol key);
 
+// Fill empty image_folder on keyframe agent nodes by reconstructing the path the
+// frontend AgentImageExtractor used (``<agents_dir>/agent_<timestamp_ns>``). The
+// backend pose-graph merge drops image_folder on agent nodes that archive before the
+// extractor populates them (the merge skips attribute updates for inactive nodes), so
+// this restores them deterministically from the node's own timestamp. ``agents_dir`` is
+// derived from an already-populated agent node, falling back to
+// ``$ADT4_OUTPUT_DIR/agents``. A folder is only set when its ``*_meta.json`` exists on
+// disk. Returns the number of folders filled.
+size_t reconcileAgentImageFolders(spark_dsg::DynamicSceneGraph& graph);
+
+// Object-layer counterpart to reconcileAgentImageFolders (a consistency safety net):
+// fill empty image_folder with ``<images_dir>/<C>_<id>`` when that directory exists on
+// disk. Returns the number of folders filled.
+size_t reconcileObjectImageFolders(spark_dsg::DynamicSceneGraph& graph);
+
 template <typename T>
 void mergeIndices(const T& from, T& to) {
   std::vector<typename T::value_type> from_indices(from.begin(), from.end());

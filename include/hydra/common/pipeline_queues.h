@@ -38,6 +38,8 @@
 #include <memory>
 
 #include "hydra/common/message_queue.h"
+#include "hydra/frontend/subkeyframe_anchor.h"
+#include "hydra/input/sensor_input_packet.h"
 #include "hydra/loop_closure/registration_solution.h"
 
 namespace pose_graph_tools {
@@ -72,6 +74,15 @@ class PipelineQueues {
   LcdQueue::Ptr lcd_queue;
   //! Optional BoW descriptor queue to LCD module
   BowQueue::Ptr bow_queue;
+
+  //! Full-rate color+depth tap for the sub-keyframe module. Null unless the
+  //! SubKeyframeModule creates it; the image receiver's tap only pushes when set.
+  MessageQueue<SensorInputPacket::Ptr>::Ptr subkeyframe_queue;
+
+  //! Hand-off from the SubKeyframeModule thread to the frontend (GraphBuilder)
+  //! thread, which owns all mutation of the frontend DSG. Null unless the
+  //! SubKeyframeModule creates it. Drained by GraphBuilder::updateSubKeyframes.
+  MessageQueue<SubKeyframeRequest>::Ptr subkeyframe_node_queue;
 
  private:
   PipelineQueues();
