@@ -74,9 +74,11 @@ void declare_config(RegionGrowingTraversabilityClustering::Config& config) {
   field(config.num_orientation_bins, "num_orientation_bins");
   field(config.use_diagonal_connectivity, "use_diagonal_connectivity");
   field(config.min_connection_width_voxels, "min_connection_width_voxels");
+  field(config.fill_enclosed_unknown_max_voxels, "fill_enclosed_unknown_max_voxels");
   check(config.max_radius, GT, 0.0f, "max_radius");
   check(config.num_orientation_bins, GE, 3, "num_orientation_bins");
   check(config.min_connection_width_voxels, GE, 1, "min_connection_width_voxels");
+  check(config.fill_enclosed_unknown_max_voxels, GE, 0, "fill_enclosed_unknown_max_voxels");
 }
 
 RegionGrowingTraversabilityClustering::RegionGrowingTraversabilityClustering(
@@ -137,17 +139,39 @@ VoxelSet RegionGrowingTraversabilityClustering::initializeVoxels(
 
   const size_t num_neighbors = config.use_diagonal_connectivity ? 8u : 4u;
   const int erosion_radius = config.min_connection_width_voxels - 1;
+
+  VoxelSet connected;
   if (erosion_radius <= 0) {
-    return growRegion(candidates, start_index, num_neighbors);
+    connected = growRegion(candidates, start_index, num_neighbors);
+  } else {
+    const VoxelSet core = erodeCandidates(candidates, erosion_radius);
+    if (core.find(start_index) == core.end()) {
+      // Robot cell is not "wide" (e.g. hugging a wall); fall back to plain
+      // connectivity so we never drop all places for a frame.
+      connected = growRegion(candidates, start_index, num_neighbors);
+    } else {
+      connected = growConnectedWithMinWidth(candidates, core, start_index, num_neighbors);
+    }
   }
 
-  const VoxelSet core = erodeCandidates(candidates, erosion_radius);
-  if (core.find(start_index) == core.end()) {
-    // Robot cell is not "wide" (e.g. hugging a wall); fall back to plain
-    // connectivity so we never drop all places for a frame.
-    return growRegion(candidates, start_index, num_neighbors);
+  // Optionally fill small UNKNOWN (unobserved) pockets enclosed by the connected
+  // traversable region, so navigable floor the robot circled but did not fully observe
+  // still becomes places. INTRAVERSABLE (obstacle) columns are never collected here,
+  // so chairs/walls stay as holes.
+  if (config.fill_enclosed_unknown_max_voxels > 0) {
+    VoxelSet unknown;
+    for (const auto& block : layer) {
+      for (size_t i = 0; i < block.voxels.size(); ++i) {
+        if (block.voxels[i].state == State::UNKNOWN) {
+          unknown.insert(block.globalFromLocalIndex(block.indexFromLinear(i)));
+        }
+      }
+    }
+    const VoxelSet fill = enclosedUnknownFill(
+        connected, unknown, config.fill_enclosed_unknown_max_voxels, num_neighbors);
+    connected.insert(fill.begin(), fill.end());
   }
-  return growConnectedWithMinWidth(candidates, core, start_index, num_neighbors);
+  return connected;
 }
 
 VoxelMap RegionGrowingTraversabilityClustering::initializeRegions(
@@ -528,6 +552,51 @@ VoxelSet RegionGrowingTraversabilityClustering::growConnectedWithMinWidth(
     }
   }
   return result;
+}
+
+VoxelSet RegionGrowingTraversabilityClustering::enclosedUnknownFill(
+    const VoxelSet& connected,
+    const VoxelSet& unknown,
+    int max_hole_voxels,
+    size_t num_neighbors) {
+  VoxelSet fill;
+  if (max_hole_voxels <= 0) {
+    return fill;
+  }
+  VoxelSet visited;
+  for (const auto& seed : unknown) {
+    if (!visited.insert(seed).second) {
+      continue;  // already part of a processed component
+    }
+    // BFS the full UNKNOWN connected component; track its size and whether it is
+    // adjacent to the connected traversable region.
+    VoxelSet component;
+    bool touches_connected = false;
+    std::queue<VoxelIndex> queue;
+    queue.push(seed);
+    while (!queue.empty()) {
+      const auto current = queue.front();
+      queue.pop();
+      component.insert(current);
+      for (size_t k = 0; k < num_neighbors && k < neighbors_.size(); ++k) {
+        const VoxelIndex n = current + neighbors_[k];
+        if (unknown.find(n) != unknown.end()) {
+          if (visited.insert(n).second) {
+            queue.push(n);
+          }
+        } else if (connected.find(n) != connected.end()) {
+          touches_connected = true;
+        }
+      }
+    }
+    // A fillable hole is small (the unobserved exterior far exceeds the cap) and
+    // borders the region the robot actually reached.
+    if (touches_connected &&
+        static_cast<int>(component.size()) <= max_hole_voxels) {
+      fill.insert(component.begin(), component.end());
+    }
+  }
+  return fill;
 }
 
 void RegionGrowingTraversabilityClustering::Region::merge(const Region& other) {

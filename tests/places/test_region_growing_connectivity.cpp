@@ -13,6 +13,7 @@ struct RegionGrowingTest : public RegionGrowingTraversabilityClustering {
   using RegionGrowingTraversabilityClustering::growRegion;
   using RegionGrowingTraversabilityClustering::erodeCandidates;
   using RegionGrowingTraversabilityClustering::growConnectedWithMinWidth;
+  using RegionGrowingTraversabilityClustering::enclosedUnknownFill;
 };
 
 using VoxelSet = RegionGrowingTraversabilityClustering::VoxelSet;
@@ -89,6 +90,39 @@ TEST(RegionGrowingConnectivity, WideDoorwayConnects) {
   const auto result = RegionGrowingTest::growConnectedWithMinWidth(
       candidates, core, VoxelIndex(1, 1, 0), 4u);
   EXPECT_TRUE(result.count(VoxelIndex(5, 1, 0)));  // room B reached via doorway
+}
+
+TEST(RegionGrowingConnectivity, EnclosedUnknownHoleFilled) {
+  // 5x5 connected traversable region with the center (2,2) carved out as UNKNOWN.
+  VoxelSet connected = makeRoom(0, 4, 0, 4);
+  connected.erase(VoxelIndex(2, 2, 0));
+  const VoxelSet unknown = makeSet({{2, 2}});
+
+  const auto fill = RegionGrowingTest::enclosedUnknownFill(
+      connected, unknown, /*max_hole_voxels=*/10, 4u);
+  EXPECT_TRUE(fill.count(VoxelIndex(2, 2, 0)));  // small enclosed pocket -> filled
+}
+
+TEST(RegionGrowingConnectivity, LargeUnknownExteriorNotFilled) {
+  // A small connected patch beside a big UNKNOWN region: the exterior must NOT fill.
+  const VoxelSet connected = makeSet({{0, 0}, {0, 1}, {1, 0}, {1, 1}});
+  VoxelSet unknown;
+  for (int x = 2; x <= 9; ++x)
+    for (int y = 0; y <= 9; ++y) unknown.insert(VoxelIndex(x, y, 0));  // 80 voxels
+
+  const auto fill = RegionGrowingTest::enclosedUnknownFill(
+      connected, unknown, /*max_hole_voxels=*/10, 4u);
+  EXPECT_TRUE(fill.empty());  // component (80) exceeds cap -> left as exterior
+}
+
+TEST(RegionGrowingConnectivity, DetachedUnknownNotFilled) {
+  // Small UNKNOWN pocket not adjacent to the connected region -> not filled.
+  const VoxelSet connected = makeRoom(0, 2, 0, 2);
+  const VoxelSet unknown = makeSet({{10, 10}});  // isolated, far away
+
+  const auto fill = RegionGrowingTest::enclosedUnknownFill(
+      connected, unknown, /*max_hole_voxels=*/10, 4u);
+  EXPECT_TRUE(fill.empty());
 }
 
 }  // namespace hydra::places

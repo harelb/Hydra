@@ -61,6 +61,13 @@ class RegionGrowingTraversabilityClustering : public TraversabilityClustering {
     //! (W-1)-radius orthogonal neighborhood is fully traversable, severing phantom
     //! gaps narrower than W voxels between rooms. Voxel size 0.1 m.
     int min_connection_width_voxels = 1;
+    //! Fill UNKNOWN (unobserved) holes enclosed by the robot-connected traversable
+    //! region, up to this many voxels per hole. 0 disables. A hole qualifies only if
+    //! its connected UNKNOWN component is <= this size AND touches the connected
+    //! traversable set; INTRAVERSABLE (obstacle) voxels are never filled and the large
+    //! unobserved exterior exceeds the cap, so this fills small unseen pockets of
+    //! navigable floor without inferring space behind walls. Voxel size 0.1 m.
+    int fill_enclosed_unknown_max_voxels = 0;
   } const config;
 
   using Voxels = VoxelIndices;
@@ -202,6 +209,19 @@ class RegionGrowingTraversabilityClustering : public TraversabilityClustering {
                                             const VoxelSet& core,
                                             const VoxelIndex& seed,
                                             size_t num_neighbors);
+
+  /**
+   * @brief Return the UNKNOWN voxels that should be filled as traversable: those whose
+   * connected UNKNOWN component is <= max_hole_voxels AND is adjacent to `connected`.
+   * Large components (the unobserved exterior) and components not touching the
+   * connected region are left out; INTRAVERSABLE voxels are not in `unknown` so are
+   * never filled. Fills small enclosed pockets of navigable floor. max_hole_voxels<=0
+   * returns empty.
+   */
+  static VoxelSet enclosedUnknownFill(const VoxelSet& connected,
+                                      const VoxelSet& unknown,
+                                      int max_hole_voxels,
+                                      size_t num_neighbors);
 
   void updatePlaceNodeAttributes(spark_dsg::TravNodeAttributes& attrs,
                                  Region& region,
