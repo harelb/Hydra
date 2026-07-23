@@ -144,7 +144,8 @@ VoxelSet RegionGrowingTraversabilityClustering::initializeVoxels(
   if (erosion_radius <= 0) {
     connected = growRegion(candidates, start_index, num_neighbors);
   } else {
-    const VoxelSet core = erodeCandidates(candidates, erosion_radius);
+    const VoxelSet core =
+        erodeCandidates(candidates, erosion_radius, config.use_diagonal_connectivity);
     if (core.find(start_index) == core.end()) {
       // Robot cell is not "wide" (e.g. hugging a wall); fall back to plain
       // connectivity so we never drop all places for a frame.
@@ -502,7 +503,7 @@ VoxelSet RegionGrowingTraversabilityClustering::growRegion(
 }
 
 VoxelSet RegionGrowingTraversabilityClustering::erodeCandidates(
-    const VoxelSet& candidates, int radius) {
+    const VoxelSet& candidates, int radius, bool use_diagonal) {
   if (radius <= 0) {
     return candidates;
   }
@@ -511,8 +512,15 @@ VoxelSet RegionGrowingTraversabilityClustering::erodeCandidates(
     bool keep = true;
     for (int dx = -radius; dx <= radius && keep; ++dx) {
       for (int dy = -radius; dy <= radius; ++dy) {
-        if (std::abs(dx) + std::abs(dy) > radius || (dx == 0 && dy == 0)) {
-          continue;  // 4-connected (plus) ball, excluding the center
+        if (dx == 0 && dy == 0) {
+          continue;
+        }
+        // Structuring element follows the connectivity: Chebyshev (square) ball for
+        // 8-connected, Manhattan (plus) ball for 4-connected.
+        const int reach =
+            use_diagonal ? std::max(std::abs(dx), std::abs(dy)) : std::abs(dx) + std::abs(dy);
+        if (reach > radius) {
+          continue;
         }
         if (candidates.find(v + VoxelIndex(dx, dy, 0)) == candidates.end()) {
           keep = false;

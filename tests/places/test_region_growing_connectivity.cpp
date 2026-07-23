@@ -62,7 +62,7 @@ TEST(RegionGrowingConnectivity, MinWidthSeversThinBridgeKeepsRoom) {
   candidates.insert(VoxelIndex(3, 1, 0));
 
   const int radius = 1;  // min_connection_width_voxels = 2 -> radius = 1
-  const VoxelSet core = RegionGrowingTest::erodeCandidates(candidates, radius);
+  const VoxelSet core = RegionGrowingTest::erodeCandidates(candidates, radius, /*use_diagonal=*/false);
   EXPECT_FALSE(core.count(VoxelIndex(3, 1, 0)));  // 1-wide bridge eroded away
   EXPECT_TRUE(core.count(VoxelIndex(1, 1, 0)));   // room-A interior survives
 
@@ -77,6 +77,21 @@ TEST(RegionGrowingConnectivity, MinWidthSeversThinBridgeKeepsRoom) {
   EXPECT_TRUE(result.count(VoxelIndex(0, 1, 0)));
 }
 
+TEST(RegionGrowingConnectivity, ErosionStructuringElementFollowsConnectivity) {
+  // Full 3x3 block minus one diagonal corner (1,1). The center (0,0) has all 4
+  // orthogonal neighbors present but is missing a diagonal neighbor.
+  VoxelSet candidates = makeRoom(-1, 1, -1, 1);
+  candidates.erase(VoxelIndex(1, 1, 0));
+
+  // 4-connected (plus) erosion: only orthogonal neighbors checked -> center survives.
+  const auto plus = RegionGrowingTest::erodeCandidates(candidates, 1, /*use_diagonal=*/false);
+  EXPECT_TRUE(plus.count(VoxelIndex(0, 0, 0)));
+
+  // 8-connected (square) erosion: the missing diagonal (1,1) disqualifies the center.
+  const auto square = RegionGrowingTest::erodeCandidates(candidates, 1, /*use_diagonal=*/true);
+  EXPECT_FALSE(square.count(VoxelIndex(0, 0, 0)));
+}
+
 TEST(RegionGrowingConnectivity, WideDoorwayConnects) {
   // Same rooms but a full 3-wide doorway at x=3 (y=0,1,2).
   VoxelSet candidates = makeRoom(0, 2, 0, 2);
@@ -84,7 +99,7 @@ TEST(RegionGrowingConnectivity, WideDoorwayConnects) {
   for (int y = 0; y <= 2; ++y) candidates.insert(VoxelIndex(3, y, 0));
 
   const int radius = 1;
-  const VoxelSet core = RegionGrowingTest::erodeCandidates(candidates, radius);
+  const VoxelSet core = RegionGrowingTest::erodeCandidates(candidates, radius, /*use_diagonal=*/false);
   EXPECT_TRUE(core.count(VoxelIndex(3, 1, 0)));  // wide doorway survives erosion
 
   const auto result = RegionGrowingTest::growConnectedWithMinWidth(
