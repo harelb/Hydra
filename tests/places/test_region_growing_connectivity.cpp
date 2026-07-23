@@ -92,14 +92,26 @@ TEST(RegionGrowingConnectivity, WideDoorwayConnects) {
   EXPECT_TRUE(result.count(VoxelIndex(5, 1, 0)));  // room B reached via doorway
 }
 
+namespace {
+// observed = union of everything present in the layer (connected + unknown here),
+// so the "frontier" is any neighbor outside this union.
+VoxelSet unionSet(const VoxelSet& a, const VoxelSet& b) {
+  VoxelSet s = a;
+  s.insert(b.begin(), b.end());
+  return s;
+}
+}  // namespace
+
 TEST(RegionGrowingConnectivity, EnclosedUnknownHoleFilled) {
   // 5x5 connected traversable region with the center (2,2) carved out as UNKNOWN.
+  // (2,2)'s only neighbors are connected voxels -> enclosed, not frontier.
   VoxelSet connected = makeRoom(0, 4, 0, 4);
   connected.erase(VoxelIndex(2, 2, 0));
   const VoxelSet unknown = makeSet({{2, 2}});
+  const VoxelSet observed = unionSet(connected, unknown);
 
   const auto fill = RegionGrowingTest::enclosedUnknownFill(
-      connected, unknown, /*max_hole_voxels=*/10, 4u);
+      connected, unknown, observed, /*max_hole_voxels=*/10, 4u);
   EXPECT_TRUE(fill.count(VoxelIndex(2, 2, 0)));  // small enclosed pocket -> filled
 }
 
@@ -109,9 +121,10 @@ TEST(RegionGrowingConnectivity, LargeUnknownExteriorNotFilled) {
   VoxelSet unknown;
   for (int x = 2; x <= 9; ++x)
     for (int y = 0; y <= 9; ++y) unknown.insert(VoxelIndex(x, y, 0));  // 80 voxels
+  const VoxelSet observed = unionSet(connected, unknown);
 
   const auto fill = RegionGrowingTest::enclosedUnknownFill(
-      connected, unknown, /*max_hole_voxels=*/10, 4u);
+      connected, unknown, observed, /*max_hole_voxels=*/10, 4u);
   EXPECT_TRUE(fill.empty());  // component (80) exceeds cap -> left as exterior
 }
 
@@ -119,10 +132,23 @@ TEST(RegionGrowingConnectivity, DetachedUnknownNotFilled) {
   // Small UNKNOWN pocket not adjacent to the connected region -> not filled.
   const VoxelSet connected = makeRoom(0, 2, 0, 2);
   const VoxelSet unknown = makeSet({{10, 10}});  // isolated, far away
+  const VoxelSet observed = unionSet(connected, unknown);
 
   const auto fill = RegionGrowingTest::enclosedUnknownFill(
-      connected, unknown, /*max_hole_voxels=*/10, 4u);
+      connected, unknown, observed, /*max_hole_voxels=*/10, 4u);
   EXPECT_TRUE(fill.empty());
+}
+
+TEST(RegionGrowingConnectivity, FrontierPocketNotFilled) {
+  // A small UNKNOWN pocket bordering connected on one side but open to the frontier
+  // on the others (its (1,1)/(1,3)/(2,2) neighbors are NOT in `observed`).
+  const VoxelSet connected = makeSet({{0, 0}, {0, 1}, {0, 2}, {0, 3}, {0, 4}});
+  const VoxelSet unknown = makeSet({{1, 2}});   // touches connected at (0,2)
+  const VoxelSet observed = unionSet(connected, unknown);  // (2,2),(1,1),(1,3) absent
+
+  const auto fill = RegionGrowingTest::enclosedUnknownFill(
+      connected, unknown, observed, /*max_hole_voxels=*/10, 4u);
+  EXPECT_TRUE(fill.empty());  // touches frontier -> rejected even though small+adjacent
 }
 
 }  // namespace hydra::places

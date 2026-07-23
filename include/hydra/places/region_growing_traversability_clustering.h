@@ -212,14 +212,17 @@ class RegionGrowingTraversabilityClustering : public TraversabilityClustering {
 
   /**
    * @brief Return the UNKNOWN voxels that should be filled as traversable: those whose
-   * connected UNKNOWN component is <= max_hole_voxels AND is adjacent to `connected`.
-   * Large components (the unobserved exterior) and components not touching the
-   * connected region are left out; INTRAVERSABLE voxels are not in `unknown` so are
-   * never filled. Fills small enclosed pockets of navigable floor. max_hole_voxels<=0
-   * returns empty.
+   * connected UNKNOWN component (a) is <= max_hole_voxels, (b) is adjacent to
+   * `connected`, and (c) is fully enclosed by the observed region -- i.e. no voxel of
+   * the component has a neighbor outside `observed` (the set of all voxels present in
+   * the layer). Condition (c) rejects pockets at the observation frontier, where
+   * traversed floor abuts unobserved exterior directly, so only interior holes wrapped
+   * by observed floor fill. INTRAVERSABLE voxels are not in `unknown` so are never
+   * filled. max_hole_voxels<=0 returns empty.
    */
   static VoxelSet enclosedUnknownFill(const VoxelSet& connected,
                                       const VoxelSet& unknown,
+                                      const VoxelSet& observed,
                                       int max_hole_voxels,
                                       size_t num_neighbors);
 

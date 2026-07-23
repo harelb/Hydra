@@ -159,16 +159,19 @@ VoxelSet RegionGrowingTraversabilityClustering::initializeVoxels(
   // still becomes places. INTRAVERSABLE (obstacle) columns are never collected here,
   // so chairs/walls stay as holes.
   if (config.fill_enclosed_unknown_max_voxels > 0) {
-    VoxelSet unknown;
+    VoxelSet unknown, observed;
     for (const auto& block : layer) {
       for (size_t i = 0; i < block.voxels.size(); ++i) {
+        const auto idx = block.globalFromLocalIndex(block.indexFromLinear(i));
+        observed.insert(idx);  // every voxel present in the layer (any state)
         if (block.voxels[i].state == State::UNKNOWN) {
-          unknown.insert(block.globalFromLocalIndex(block.indexFromLinear(i)));
+          unknown.insert(idx);
         }
       }
     }
-    const VoxelSet fill = enclosedUnknownFill(
-        connected, unknown, config.fill_enclosed_unknown_max_voxels, num_neighbors);
+    const VoxelSet fill =
+        enclosedUnknownFill(connected, unknown, observed,
+                            config.fill_enclosed_unknown_max_voxels, num_neighbors);
     connected.insert(fill.begin(), fill.end());
   }
   return connected;
@@ -557,6 +560,7 @@ VoxelSet RegionGrowingTraversabilityClustering::growConnectedWithMinWidth(
 VoxelSet RegionGrowingTraversabilityClustering::enclosedUnknownFill(
     const VoxelSet& connected,
     const VoxelSet& unknown,
+    const VoxelSet& observed,
     int max_hole_voxels,
     size_t num_neighbors) {
   VoxelSet fill;
@@ -568,10 +572,12 @@ VoxelSet RegionGrowingTraversabilityClustering::enclosedUnknownFill(
     if (!visited.insert(seed).second) {
       continue;  // already part of a processed component
     }
-    // BFS the full UNKNOWN connected component; track its size and whether it is
-    // adjacent to the connected traversable region.
+    // BFS the full UNKNOWN connected component; track its size, whether it borders the
+    // connected region, and whether it touches the observation frontier (a neighbor
+    // that is not present in the layer at all).
     VoxelSet component;
     bool touches_connected = false;
+    bool touches_frontier = false;
     std::queue<VoxelIndex> queue;
     queue.push(seed);
     while (!queue.empty()) {
@@ -586,12 +592,15 @@ VoxelSet RegionGrowingTraversabilityClustering::enclosedUnknownFill(
           }
         } else if (connected.find(n) != connected.end()) {
           touches_connected = true;
+        } else if (observed.find(n) == observed.end()) {
+          touches_frontier = true;  // neighbor beyond the observed region
         }
       }
     }
-    // A fillable hole is small (the unobserved exterior far exceeds the cap) and
-    // borders the region the robot actually reached.
-    if (touches_connected &&
+    // A fillable hole borders the reached region, is small (the unobserved exterior far
+    // exceeds the cap), and is fully enclosed by observed floor (does not reach the
+    // frontier). The frontier test is what keeps peripheral/behind-wall pockets out.
+    if (touches_connected && !touches_frontier &&
         static_cast<int>(component.size()) <= max_hole_voxels) {
       fill.insert(component.begin(), component.end());
     }
