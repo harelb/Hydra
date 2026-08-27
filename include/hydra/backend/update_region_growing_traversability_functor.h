@@ -50,6 +50,30 @@ struct UpdateRegionGrowingTraversabilityFunctor : public UpdateFunctor {
     //! Layer to update traversability in
     std::string layer = DsgLayers::TRAVERSABILITY;
 
+    //! Maximum centroid-to-centroid distance [m] at which two places may be linked by
+    //! the proximity fallback. 0 (the default) disables the fallback entirely, leaving
+    //! only the star-polygon intersection test. The fallback exists because
+    //! TravNodeAttributes::fromExteriorPoints takes the MINIMUM radius per angular bin
+    //! (and fills empty bins with the global minimum), so the stored polygon is a
+    //! heavily shrunk INNER approximation of the region; since the region-growing
+    //! clustering partitions voxels disjointly, adjacent regions abut rather than
+    //! overlap and intersects() almost never fires across an active-window boundary.
+    double max_connection_distance_m = 0.0;
+
+    //! Maximum gap [m] that may remain between the two boundaries along the connecting
+    //! ray for the proximity fallback to fire, i.e. distance - reach_1 - reach_2 where
+    //! reach_i is place i's own boundary radius in the direction of the other place.
+    //! This is what keeps the fallback from linking two places that merely happen to be
+    //! close: they must very nearly touch along the direction we are linking them in.
+    double max_connection_gap_m = 1.0;
+
+    //! Require the boundary bins facing the other place to be TRAVERSABLE on both
+    //! sides. The exterior boundary voxel states record why the region stopped growing
+    //! in that direction (a wall yields INTRAVERSABLE, unobserved space UNKNOWN), so
+    //! this is the available evidence that the ray between the two centroids is not
+    //! crossing an obstacle. Disabling it allows linking through walls.
+    bool require_traversable_boundary = true;
+
     DeformationInterpolator::Config deformation;
   } const config;
 
@@ -113,6 +137,31 @@ struct UpdateRegionGrowingTraversabilityFunctor : public UpdateFunctor {
    */
   std::vector<NodeId> findConnections(const DynamicSceneGraph& dsg,
                                       const TravNodeAttributes& from_attrs) const;
+
+  /**
+   * @brief Check whether two traversability nodes should be connected by an edge, i.e.
+   * their boundaries overlap or (optionally) they nearly touch along the ray joining
+   * them. Symmetric in its arguments.
+   */
+  bool areConnected(const TravNodeAttributes& attrs1,
+                    const TravNodeAttributes& attrs2) const;
+
+  /**
+   * @brief Proximity fallback for areConnected: two places are linked if their
+   * centroids are within max_connection_distance_m and the gap left between their two
+   * boundaries along the connecting ray is at most max_connection_gap_m.
+   */
+  bool isNearlyTouching(const TravNodeAttributes& attrs1,
+                        const TravNodeAttributes& attrs2) const;
+
+  /**
+   * @brief Distance from a node's centroid to its boundary in the given (local frame)
+   * direction, interpolated between angular bins the same way contains() does. Returns
+   * a negative value if the boundary in that direction is not traversable, or if there
+   * is no boundary information at all.
+   */
+  double boundaryReach(const TravNodeAttributes& attrs,
+                       const Eigen::Vector3d& direction_L) const;
 
   /**
    * @brief Check if two traversability nodes have active window (temporal) overlap.

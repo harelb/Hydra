@@ -39,6 +39,8 @@
 #include <spark_dsg/node_attributes.h>
 #include <spark_dsg/traversability_boundary.h>
 
+#include <algorithm>
+#include <cmath>
 #include <queue>
 
 #include "hydra/common/global_info.h"
@@ -55,7 +57,13 @@ void declare_config(UpdateRegionGrowingTraversabilityFunctor::Config& config) {
   name("UpdateRegionGrowingTraversabilityFunctor::Config");
   base<VerbosityConfig>(config);
   field(config.layer, "layer");
+  field(config.max_connection_distance_m, "max_connection_distance_m", "m");
+  field(config.max_connection_gap_m, "max_connection_gap_m", "m");
+  field(config.require_traversable_boundary, "require_traversable_boundary");
   field(config.deformation, "deformation");
+
+  check(config.max_connection_distance_m, GE, 0.0, "max_connection_distance_m");
+  check(config.max_connection_gap_m, GE, 0.0, "max_connection_gap_m");
 }
 
 static const auto registration =
@@ -168,7 +176,7 @@ void UpdateRegionGrowingTraversabilityFunctor::findInactiveEdges(
       }
 
       visited.insert(edge_key);
-      if (from_attrs.intersects(to_attrs)) {
+      if (areConnected(from_attrs, to_attrs)) {
         // NOTE(lschmid): Weight of -2 indicates this is an inactive overlap edge.
         dsg.addOrUpdateEdge(from_id, to_id, std::make_unique<EdgeAttributes>(-2.0));
         merge_candidates_.insert(edge_key);
@@ -201,7 +209,7 @@ void UpdateRegionGrowingTraversabilityFunctor::pruneActiveWindowEdges(
     // Previously active edges to revisit
     const auto& attrs_1 = dsg.getNode(edge_key.k1).attributes<TravNodeAttributes>();
     const auto& attrs_2 = dsg.getNode(edge_key.k2).attributes<TravNodeAttributes>();
-    if (!attrs_1.intersects(attrs_2)) {
+    if (!areConnected(attrs_1, attrs_2)) {
       to_remove.insert(edge_key);
       continue;
     }
@@ -270,11 +278,81 @@ std::vector<NodeId> UpdateRegionGrowingTraversabilityFunctor::findConnections(
     if (hasActiveOverlap(from_attrs, to_attrs)) {
       continue;
     }
-    if (from_attrs.intersects(to_attrs)) {
+    if (areConnected(from_attrs, to_attrs)) {
       connections.emplace_back(to_id);
     }
   }
   return connections;
+}
+
+bool UpdateRegionGrowingTraversabilityFunctor::areConnected(
+    const TravNodeAttributes& attrs1, const TravNodeAttributes& attrs2) const {
+  // The polygon overlap test is authoritative: whatever it accepts is a real overlap.
+  if (attrs1.intersects(attrs2)) {
+    return true;
+  }
+  return isNearlyTouching(attrs1, attrs2);
+}
+
+bool UpdateRegionGrowingTraversabilityFunctor::isNearlyTouching(
+    const TravNodeAttributes& attrs1, const TravNodeAttributes& attrs2) const {
+  if (config.max_connection_distance_m <= 0.0) {
+    return false;
+  }
+
+  const Eigen::Vector3d one_to_two = attrs2.position - attrs1.position;
+  const double distance = one_to_two.norm();
+  if (distance <= 0.0 || distance > config.max_connection_distance_m) {
+    return false;
+  }
+
+  // NOTE(harel): Proximity alone would happily link two places on opposite sides of a
+  // wall. We instead require that walking from one centroid towards the other leaves
+  // each place's own boundary in that direction, and that the two exit points nearly
+  // meet. Both boundaries are inner approximations (see max_connection_distance_m), so
+  // the residual gap is a slack parameter rather than a true free-space distance.
+  const double reach_1 = boundaryReach(attrs1, one_to_two);
+  if (reach_1 < 0.0) {
+    return false;
+  }
+  const double reach_2 = boundaryReach(attrs2, -one_to_two);
+  if (reach_2 < 0.0) {
+    return false;
+  }
+
+  return distance - reach_1 - reach_2 <= config.max_connection_gap_m;
+}
+
+double UpdateRegionGrowingTraversabilityFunctor::boundaryReach(
+    const TravNodeAttributes& attrs, const Eigen::Vector3d& direction_L) const {
+  const size_t num_bins = attrs.radii.size();
+  if (num_bins == 0) {
+    return -1.0;
+  }
+
+  // Same bin interpolation as TravNodeAttributes::contains().
+  const double bin = attrs.getBinPercentage(direction_L) * num_bins;
+  const size_t bin_left =
+      std::min(static_cast<size_t>(std::floor(bin)), num_bins - 1);
+  const size_t bin_right = (bin_left + 1) % num_bins;
+
+  if (config.require_traversable_boundary) {
+    if (attrs.states.size() != num_bins) {
+      // No state information: refuse to bridge rather than guess.
+      return -1.0;
+    }
+    // The two bins bracketing the ray give us the angular resolution of the boundary
+    // (~18 deg by default) as tolerance; either one being traversable is evidence of
+    // free space towards the other place.
+    if (attrs.states[bin_left] != State::TRAVERSABLE &&
+        attrs.states[bin_right] != State::TRAVERSABLE) {
+      return -1.0;
+    }
+  }
+
+  return attrs.radii[bin_left] +
+         (attrs.radii[bin_right] - attrs.radii[bin_left]) *
+             (bin - static_cast<double>(bin_left));
 }
 
 bool UpdateRegionGrowingTraversabilityFunctor::hasActiveOverlap(
