@@ -264,6 +264,13 @@ void GraphBuilder::spin() {
 }
 
 void GraphBuilder::processNextInput(const ActiveWindowOutput& msg) {
+  // Buffer the imagery of EVERY output packet: the pose graph tracker below stamps an
+  // agent node per packet, but only the last packet of a collated batch reaches
+  // updateImpl, so this is the only place the intermediate frames can be captured.
+  if (agent_extractor_) {
+    agent_extractor_->addFrame(msg);
+  }
+
   if (tracker_) {
     const auto packet = tracker_->update(msg.timestamp_ns, msg.world_T_body());
     pose_graph_updates_.push(packet);

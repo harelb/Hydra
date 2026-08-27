@@ -25,6 +25,7 @@
  * -------------------------------------------------------------------------- */
 #include "hydra/frontend/agent_image_extractor.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -74,9 +75,13 @@ void declare_config(AgentImageExtractor::Config& config) {
   field(config.min_rotation_deg, "min_rotation_deg");
   field(config.image_output_path, "image_output_path");
   field(config.enabled, "enabled");
+  field(config.max_pairing_time_diff_s, "max_pairing_time_diff_s", "s");
+  field(config.max_buffered_frames, "max_buffered_frames");
 
   check(config.min_translation_m, GE, 0.0f, "min_translation_m");
   check(config.min_rotation_deg, GE, 0.0f, "min_rotation_deg");
+  check(config.max_pairing_time_diff_s, GE, 0.0, "max_pairing_time_diff_s");
+  check(config.max_buffered_frames, GT, size_t(0), "max_buffered_frames");
 }
 
 AgentImageExtractor::AgentImageExtractor(const Config& config) : config(config) {
@@ -88,10 +93,62 @@ AgentImageExtractor::AgentImageExtractor(const Config& config) : config(config) 
   }
 }
 
-void AgentImageExtractor::updateGraph(DynamicSceneGraph& graph, const ActiveWindowOutput& input) {
+void AgentImageExtractor::addFrame(const ActiveWindowOutput& input) {
+  if (!config.enabled || config.image_output_path.empty() || !input.sensor_data) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(frame_mutex_);
+  if (!frames_.empty() && frames_.back().timestamp_ns >= input.timestamp_ns) {
+    // Duplicate or out-of-order packet: the buffer must stay sorted for findFrame.
+    return;
+  }
+
+  frames_.push_back({input.timestamp_ns, input.sensor_data});
+  while (frames_.size() > config.max_buffered_frames) {
+    frames_.pop_front();
+  }
+}
+
+std::optional<size_t> AgentImageExtractor::findFrame(
+    const std::vector<BufferedFrame>& frames,
+    size_t search_start,
+    uint64_t timestamp_ns) const {
+  const auto tolerance_ns =
+      static_cast<uint64_t>(config.max_pairing_time_diff_s * 1.0e9);
+
+  std::optional<size_t> best;
+  uint64_t best_diff = 0;
+  for (size_t i = search_start; i < frames.size(); ++i) {
+    const auto frame_ns = frames[i].timestamp_ns;
+    const uint64_t diff =
+        frame_ns > timestamp_ns ? frame_ns - timestamp_ns : timestamp_ns - frame_ns;
+    if (diff > tolerance_ns) {
+      // Frames are sorted, so once we are past the node we can only get worse.
+      if (frame_ns > timestamp_ns) {
+        break;
+      }
+      continue;
+    }
+
+    if (!best || diff < best_diff) {
+      best = i;
+      best_diff = diff;
+    }
+  }
+
+  return best;
+}
+
+void AgentImageExtractor::updateGraph(DynamicSceneGraph& graph,
+                                     const ActiveWindowOutput& input) {
   if (!config.enabled || config.image_output_path.empty()) {
     return;
   }
+
+  // Safety net: the packet we are called with is the collated one, so its frame is
+  // usually already buffered. addFrame is idempotent per timestamp.
+  addFrame(input);
 
   const auto layer_id = graph.getLayerKey(DsgLayers::AGENTS);
   if (!layer_id) {
@@ -104,11 +161,23 @@ void AgentImageExtractor::updateGraph(DynamicSceneGraph& graph, const ActiveWind
     return;
   }
 
-  // Iterate over all agent nodes we haven't processed yet or find the latest
-  // Since updateGraph is called repeatedly, we check the newest nodes.
-  // We can just iterate and skip ones with image_folder already populated,
-  // or just track the distance from the last_keyframe_.
-  
+  // Snapshot the frames buffered by addFrame. The imagery is held by shared_ptr, so
+  // the copy is cheap, and this keeps the disk writes below out of the critical
+  // section shared with the active window thread.
+  std::vector<BufferedFrame> frames;
+  {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    frames.assign(frames_.begin(), frames_.end());
+  }
+
+  if (frames.empty()) {
+    return;  // nothing to pair against yet
+  }
+
+  const auto tolerance_ns =
+      static_cast<uint64_t>(config.max_pairing_time_diff_s * 1.0e9);
+  const auto newest_frame_ns = frames.back().timestamp_ns;
+
   // Get active nodes, sort by timestamp
   std::vector<const SceneGraphNode*> agent_nodes;
   for (const auto& [node_id, node] : layer->nodes()) {
@@ -119,13 +188,49 @@ void AgentImageExtractor::updateGraph(DynamicSceneGraph& graph, const ActiveWind
            b->template attributes<AgentNodeAttributes>().timestamp.count();
   });
 
+  // Each buffered frame belongs to at most one agent node; nodes are visited in time
+  // order, so consumed frames are always a prefix of the snapshot.
+  size_t search_start = 0;
+
   for (const auto* node : agent_nodes) {
     auto& attrs = node->template attributes<AgentNodeAttributes>();
-    
+
     // Skip if already processed
     if (!attrs.image_folder.empty()) {
       continue;
     }
+
+    const auto node_ns = static_cast<uint64_t>(attrs.timestamp.count());
+    if (node_ns <= last_decided_ns_) {
+      continue;  // already decided on a previous call
+    }
+
+    // Pair the node with the sensor frame it was actually created from. Attaching
+    // whatever frame happens to be current instead silently gives every node of a
+    // collated backlog the same image at the wrong pose, which cannot be detected
+    // downstream.
+    const auto frame_idx = findFrame(frames, search_start, node_ns);
+    if (!frame_idx) {
+      if (node_ns > newest_frame_ns + tolerance_ns) {
+        // This node's frame has not been produced yet. Later nodes are newer still,
+        // so leave the whole tail for a subsequent call.
+        break;
+      }
+
+      // The frame this node came from has already fallen out of the buffer (or never
+      // carried sensor data). A missing keyframe is honest; a mispaired one is not.
+      last_decided_ns_ = node_ns;
+      VLOG(2) << "[AgentImageExtractor] No sensor frame within "
+              << config.max_pairing_time_diff_s << " s of agent "
+              << spark_dsg::NodeSymbol(node->id).str() << " @ " << node_ns
+              << " ns; skipping keyframe.";
+      continue;
+    }
+
+    const auto& frame = frames[*frame_idx];
+    const auto& sensor_data = *frame.data;
+    search_start = *frame_idx + 1;
+    last_decided_ns_ = node_ns;
 
     const Eigen::Vector3d current_pos = attrs.position;
     const Eigen::Quaterniond current_rot = attrs.world_R_body;
@@ -145,98 +250,103 @@ void AgentImageExtractor::updateGraph(DynamicSceneGraph& graph, const ActiveWind
       }
     }
 
-    if (should_trigger) {
-      if (!input.sensor_data) {
-        // No underlying camera data available this frame
-        continue;
+    if (!should_trigger) {
+      continue;
+    }
+
+    // Update state
+    last_keyframe_.position = current_pos;
+    last_keyframe_.orientation = current_rot;
+    last_keyframe_.initialized = true;
+
+    const std::string name = "agent_" + std::to_string(attrs.timestamp.count());
+    std::filesystem::path base_path =
+        std::filesystem::path(config.image_output_path) / name;
+
+    // Write the run-level calibration once. Reprojecting a stored mask to 3D
+    // requires intrinsics + extrinsics, which are constant for a fixed camera,
+    // so we keep them out of the per-keyframe metadata.
+    if (!calib_written_) {
+      const auto* camera = dynamic_cast<const Camera*>(&sensor_data.getSensor());
+      if (camera) {
+        const auto& cc = camera->getConfig();
+        std::filesystem::path calib_path =
+            std::filesystem::path(config.image_output_path) / "camera_calib.json";
+        std::ofstream calib(calib_path);
+        calib << std::setprecision(17);
+        calib << "{\n";
+        calib << "  \"fx\": " << cc.fx << ",\n";
+        calib << "  \"fy\": " << cc.fy << ",\n";
+        calib << "  \"cx\": " << cc.cx << ",\n";
+        calib << "  \"cy\": " << cc.cy << ",\n";
+        calib << "  \"width\": " << cc.width << ",\n";
+        calib << "  \"height\": " << cc.height << ",\n";
+        calib << "  \"depth_scale\": " << kDepthScaleMetersPerUnit << ",\n";
+        calib << "  \"depth_encoding\": \"" << kDepthEncoding << "\",\n";
+        calib << "  \"body_T_sensor\": "
+              << isometryToJsonArray(camera->body_T_sensor()) << "\n";
+        calib << "}\n";
+        calib_written_ = true;
+      } else {
+        VLOG(1) << "[AgentImageExtractor] Sensor is not a Camera; skipping "
+                   "calibration export (reprojection will be unavailable).";
       }
+    }
 
-      // Update state
-      last_keyframe_.position = current_pos;
-      last_keyframe_.orientation = current_rot;
-      last_keyframe_.initialized = true;
-
-      const auto& sensor_data = *input.sensor_data;
-
-      const std::string name = "agent_" + std::to_string(attrs.timestamp.count());
-      std::filesystem::path base_path =
-          std::filesystem::path(config.image_output_path) / name;
-
-      // Write the run-level calibration once. Reprojecting a stored mask to 3D
-      // requires intrinsics + extrinsics, which are constant for a fixed camera,
-      // so we keep them out of the per-keyframe metadata.
-      if (!calib_written_) {
-        const auto* camera = dynamic_cast<const Camera*>(&sensor_data.getSensor());
-        if (camera) {
-          const auto& cc = camera->getConfig();
-          std::filesystem::path calib_path =
-              std::filesystem::path(config.image_output_path) / "camera_calib.json";
-          std::ofstream calib(calib_path);
-          calib << std::setprecision(17);
-          calib << "{\n";
-          calib << "  \"fx\": " << cc.fx << ",\n";
-          calib << "  \"fy\": " << cc.fy << ",\n";
-          calib << "  \"cx\": " << cc.cx << ",\n";
-          calib << "  \"cy\": " << cc.cy << ",\n";
-          calib << "  \"width\": " << cc.width << ",\n";
-          calib << "  \"height\": " << cc.height << ",\n";
-          calib << "  \"depth_scale\": " << kDepthScaleMetersPerUnit << ",\n";
-          calib << "  \"depth_encoding\": \"" << kDepthEncoding << "\",\n";
-          calib << "  \"body_T_sensor\": "
-                << isometryToJsonArray(camera->body_T_sensor()) << "\n";
-          calib << "}\n";
-          calib_written_ = true;
-        } else {
-          VLOG(1) << "[AgentImageExtractor] Sensor is not a Camera; skipping "
-                     "calibration export (reprojection will be unavailable).";
-        }
+    // Save RGB (OpenCV uses BGR)
+    if (!sensor_data.color_image.empty()) {
+      cv::Mat rgb_image;
+      if (sensor_data.color_image.channels() == 3) {
+        cv::cvtColor(sensor_data.color_image, rgb_image, cv::COLOR_RGB2BGR);
+      } else {
+        rgb_image = sensor_data.color_image.clone();
       }
+      cv::imwrite(base_path.string() + "_rgb.jpg", rgb_image);
+    }
 
-      // Save RGB (OpenCV uses BGR)
-      if (!sensor_data.color_image.empty()) {
-        cv::Mat rgb_image;
-        if (sensor_data.color_image.channels() == 3) {
-          cv::cvtColor(sensor_data.color_image, rgb_image, cv::COLOR_RGB2BGR);
-        } else {
-          rgb_image = sensor_data.color_image.clone();
-        }
-        cv::imwrite(base_path.string() + "_rgb.jpg", rgb_image);
+    // Save Depth losslessly. After input conversion depth_image is CV_32FC1 in
+    // meters (see input_conversion.cpp); PNG cannot store float, so we convert
+    // to 16-bit millimeters to round-trip cleanly.
+    if (!sensor_data.depth_image.empty()) {
+      const cv::Mat& depth = sensor_data.depth_image;
+      cv::Mat depth_to_save;
+      if (depth.type() == CV_32FC1) {
+        depth.convertTo(depth_to_save, CV_16UC1, 1.0 / kDepthScaleMetersPerUnit);
+      } else {
+        // Already integer depth (assumed millimeters); store as-is.
+        depth_to_save = depth;
       }
+      cv::imwrite(base_path.string() + "_depth.png", depth_to_save);
+    }
 
-      // Save Depth losslessly. After input conversion depth_image is CV_32FC1 in
-      // meters (see input_conversion.cpp); PNG cannot store float, so we convert
-      // to 16-bit millimeters to round-trip cleanly.
-      if (!sensor_data.depth_image.empty()) {
-        const cv::Mat& depth = sensor_data.depth_image;
-        cv::Mat depth_to_save;
-        if (depth.type() == CV_32FC1) {
-          depth.convertTo(depth_to_save, CV_16UC1, 1.0 / kDepthScaleMetersPerUnit);
-        } else {
-          // Already integer depth (assumed millimeters); store as-is.
-          depth_to_save = depth;
-        }
-        cv::imwrite(base_path.string() + "_depth.png", depth_to_save);
-      }
+    // Per-keyframe metadata: dynamic data only (pose + file references). Static
+    // calibration lives in camera_calib.json. frame_timestamp_ns records which
+    // sensor frame the imagery came from, so a mispairing is auditable offline.
+    {
+      std::ofstream meta(base_path.string() + "_meta.json");
+      meta << "{\n";
+      meta << "  \"timestamp_ns\": " << attrs.timestamp.count() << ",\n";
+      meta << "  \"frame_timestamp_ns\": " << frame.timestamp_ns << ",\n";
+      meta << "  \"world_T_body\": " << isometryToJsonArray(sensor_data.world_T_body)
+           << ",\n";
+      meta << "  \"rgb_file\": \"" << name << "_rgb.jpg\",\n";
+      meta << "  \"depth_file\": \"" << name << "_depth.png\",\n";
+      meta << "  \"calib\": \"camera_calib.json\"\n";
+      meta << "}\n";
+    }
 
-      // Per-keyframe metadata: dynamic data only (pose + file references). Static
-      // calibration lives in camera_calib.json.
-      {
-        std::ofstream meta(base_path.string() + "_meta.json");
-        meta << "{\n";
-        meta << "  \"timestamp_ns\": " << attrs.timestamp.count() << ",\n";
-        meta << "  \"world_T_body\": "
-             << isometryToJsonArray(sensor_data.world_T_body) << ",\n";
-        meta << "  \"rgb_file\": \"" << name << "_rgb.jpg\",\n";
-        meta << "  \"depth_file\": \"" << name << "_depth.png\",\n";
-        meta << "  \"calib\": \"camera_calib.json\"\n";
-        meta << "}\n";
-      }
+    attrs.image_folder = base_path.string();
 
-      attrs.image_folder = base_path.string();
+    VLOG(3) << "[AgentImageExtractor] Triggered keyframe extraction for agent "
+            << spark_dsg::NodeSymbol(node->id).str() << " @ "
+            << attrs.timestamp.count() << " ns";
+  }
 
-      VLOG(3) << "[AgentImageExtractor] Triggered keyframe extraction for agent " 
-              << spark_dsg::NodeSymbol(node->id).str() 
-              << " @ " << attrs.timestamp.count() << " ns";
+  // Frames older than the last node we decided on can never be paired with anything.
+  if (last_decided_ns_) {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    while (!frames_.empty() && frames_.front().timestamp_ns <= last_decided_ns_) {
+      frames_.pop_front();
     }
   }
 }
