@@ -77,11 +77,13 @@ void declare_config(AgentImageExtractor::Config& config) {
   field(config.enabled, "enabled");
   field(config.max_pairing_time_diff_s, "max_pairing_time_diff_s", "s");
   field(config.max_buffered_frames, "max_buffered_frames");
+  field(config.max_deferred_updates, "max_deferred_updates");
 
   check(config.min_translation_m, GE, 0.0f, "min_translation_m");
   check(config.min_rotation_deg, GE, 0.0f, "min_rotation_deg");
   check(config.max_pairing_time_diff_s, GE, 0.0, "max_pairing_time_diff_s");
   check(config.max_buffered_frames, GT, size_t(0), "max_buffered_frames");
+  check(config.max_deferred_updates, GT, size_t(0), "max_deferred_updates");
 }
 
 AgentImageExtractor::AgentImageExtractor(const Config& config) : config(config) {
@@ -98,13 +100,71 @@ void AgentImageExtractor::addFrame(const ActiveWindowOutput& input) {
     return;
   }
 
+  const auto& data = *input.sensor_data;
+
+  // Take a PRIVATE copy of everything we will need later. The packet's InputData
+  // shares its cv::Mat pixel buffers with the active window's own frame data (see
+  // BufferedFrame), so retaining it would couple this module's lifetime and thread
+  // safety to the active window's frame buffer. Converting into the on-disk format
+  // here allocates fresh buffers, so the copy is free: we were paying for these
+  // conversions at write time anyway, and doing them on this thread keeps the
+  // frontend spin cheap.
+  BufferedFrame frame;
+  frame.timestamp_ns = input.timestamp_ns;
+  frame.world_T_body = data.world_T_body;
+
+  if (!data.color_image.empty()) {
+    if (data.color_image.channels() == 3) {
+      cv::cvtColor(data.color_image, frame.color_bgr, cv::COLOR_RGB2BGR);
+    } else {
+      frame.color_bgr = data.color_image.clone();
+    }
+  }
+
+  if (!data.depth_image.empty()) {
+    if (data.depth_image.type() == CV_32FC1) {
+      // After input conversion depth_image is CV_32FC1 in meters (see
+      // input_conversion.cpp); PNG cannot store float, so we round-trip through
+      // 16-bit millimeters.
+      data.depth_image.convertTo(
+          frame.depth_mm, CV_16UC1, 1.0 / kDepthScaleMetersPerUnit);
+    } else {
+      // Already integer depth (assumed millimeters); store as-is.
+      frame.depth_mm = data.depth_image.clone();
+    }
+  }
+
   std::lock_guard<std::mutex> lock(frame_mutex_);
+
+  // Capture the calibration by value the first time we see a camera. Reprojecting a
+  // stored mask to 3D needs intrinsics + extrinsics, which are constant for a fixed
+  // camera, so they stay out of the per-keyframe metadata.
+  if (!calib_) {
+    const auto* camera = dynamic_cast<const Camera*>(&data.getSensor());
+    if (camera) {
+      const auto& cc = camera->getConfig();
+      CameraCalib calib;
+      calib.fx = cc.fx;
+      calib.fy = cc.fy;
+      calib.cx = cc.cx;
+      calib.cy = cc.cy;
+      calib.width = cc.width;
+      calib.height = cc.height;
+      calib.body_T_sensor = camera->body_T_sensor();
+      calib_ = calib;
+    } else {
+      LOG_FIRST_N(WARNING, 1) << "[AgentImageExtractor] Sensor is not a Camera; "
+                                 "skipping calibration export (reprojection will be "
+                                 "unavailable).";
+    }
+  }
+
   if (!frames_.empty() && frames_.back().timestamp_ns >= input.timestamp_ns) {
     // Duplicate or out-of-order packet: the buffer must stay sorted for findFrame.
     return;
   }
 
-  frames_.push_back({input.timestamp_ns, input.sensor_data});
+  frames_.push_back(std::move(frame));
   while (frames_.size() > config.max_buffered_frames) {
     frames_.pop_front();
   }
@@ -141,14 +201,14 @@ std::optional<size_t> AgentImageExtractor::findFrame(
 }
 
 void AgentImageExtractor::updateGraph(DynamicSceneGraph& graph,
-                                     const ActiveWindowOutput& input) {
+                                     const ActiveWindowOutput&) {
+  // NOTE(harel): deliberately does NOT call addFrame. GraphBuilder::processNextInput
+  // already buffered this packet (and the ones collated away with it) on the active
+  // window's thread; calling it here as well would only add a second concurrent
+  // producer for no gain.
   if (!config.enabled || config.image_output_path.empty()) {
     return;
   }
-
-  // Safety net: the packet we are called with is the collated one, so its frame is
-  // usually already buffered. addFrame is idempotent per timestamp.
-  addFrame(input);
 
   const auto layer_id = graph.getLayerKey(DsgLayers::AGENTS);
   if (!layer_id) {
@@ -161,21 +221,21 @@ void AgentImageExtractor::updateGraph(DynamicSceneGraph& graph,
     return;
   }
 
-  // Snapshot the frames buffered by addFrame. The imagery is held by shared_ptr, so
-  // the copy is cheap, and this keeps the disk writes below out of the critical
-  // section shared with the active window thread.
+  // Snapshot the frames buffered by addFrame, moving nothing: the copy is of owned
+  // cv::Mat headers, so it is a refcount bump each, and it keeps the disk writes
+  // below out of the critical section shared with the active window thread.
   std::vector<BufferedFrame> frames;
+  std::optional<CameraCalib> calib;
   {
     std::lock_guard<std::mutex> lock(frame_mutex_);
     frames.assign(frames_.begin(), frames_.end());
+    calib = calib_;
   }
 
   if (frames.empty()) {
     return;  // nothing to pair against yet
   }
 
-  const auto tolerance_ns =
-      static_cast<uint64_t>(config.max_pairing_time_diff_s * 1.0e9);
   const auto newest_frame_ns = frames.back().timestamp_ns;
 
   // Get active nodes, sort by timestamp
@@ -211,15 +271,31 @@ void AgentImageExtractor::updateGraph(DynamicSceneGraph& graph,
     // downstream.
     const auto frame_idx = findFrame(frames, search_start, node_ns);
     if (!frame_idx) {
-      if (node_ns > newest_frame_ns + tolerance_ns) {
-        // This node's frame has not been produced yet. Later nodes are newer still,
-        // so leave the whole tail for a subsequent call.
-        break;
+      if (node_ns > newest_frame_ns) {
+        // The frame stream has not reached this node yet, so its frame may still be
+        // coming. Wait for it -- but only for a bounded number of updates: if it
+        // never arrives, everything behind this node would stall forever.
+        if (node_ns != deferred_node_ns_) {
+          deferred_node_ns_ = node_ns;
+          deferred_count_ = 0;
+        }
+
+        if (++deferred_count_ <= config.max_deferred_updates) {
+          break;  // later nodes are newer still, so nothing behind it can pair either
+        }
+
+        LOG_EVERY_N(WARNING, 10)
+            << "[AgentImageExtractor] Agent " << spark_dsg::NodeSymbol(node->id).str()
+            << " @ " << node_ns << " ns waited " << deferred_count_
+            << " updates for a sensor frame that never arrived; abandoning it so the "
+               "queue can drain.";
       }
 
-      // The frame this node came from has already fallen out of the buffer (or never
-      // carried sensor data). A missing keyframe is honest; a mispaired one is not.
+      // Either the frame stream has already moved past this node or we gave up
+      // waiting. A missing keyframe is honest; a mispaired one is not.
       last_decided_ns_ = node_ns;
+      deferred_node_ns_ = 0;
+      deferred_count_ = 0;
       VLOG(2) << "[AgentImageExtractor] No sensor frame within "
               << config.max_pairing_time_diff_s << " s of agent "
               << spark_dsg::NodeSymbol(node->id).str() << " @ " << node_ns
@@ -228,9 +304,10 @@ void AgentImageExtractor::updateGraph(DynamicSceneGraph& graph,
     }
 
     const auto& frame = frames[*frame_idx];
-    const auto& sensor_data = *frame.data;
     search_start = *frame_idx + 1;
     last_decided_ns_ = node_ns;
+    deferred_node_ns_ = 0;
+    deferred_count_ = 0;
 
     const Eigen::Vector3d current_pos = attrs.position;
     const Eigen::Quaterniond current_rot = attrs.world_R_body;
@@ -263,60 +340,35 @@ void AgentImageExtractor::updateGraph(DynamicSceneGraph& graph,
     std::filesystem::path base_path =
         std::filesystem::path(config.image_output_path) / name;
 
-    // Write the run-level calibration once. Reprojecting a stored mask to 3D
-    // requires intrinsics + extrinsics, which are constant for a fixed camera,
-    // so we keep them out of the per-keyframe metadata.
-    if (!calib_written_) {
-      const auto* camera = dynamic_cast<const Camera*>(&sensor_data.getSensor());
-      if (camera) {
-        const auto& cc = camera->getConfig();
-        std::filesystem::path calib_path =
-            std::filesystem::path(config.image_output_path) / "camera_calib.json";
-        std::ofstream calib(calib_path);
-        calib << std::setprecision(17);
-        calib << "{\n";
-        calib << "  \"fx\": " << cc.fx << ",\n";
-        calib << "  \"fy\": " << cc.fy << ",\n";
-        calib << "  \"cx\": " << cc.cx << ",\n";
-        calib << "  \"cy\": " << cc.cy << ",\n";
-        calib << "  \"width\": " << cc.width << ",\n";
-        calib << "  \"height\": " << cc.height << ",\n";
-        calib << "  \"depth_scale\": " << kDepthScaleMetersPerUnit << ",\n";
-        calib << "  \"depth_encoding\": \"" << kDepthEncoding << "\",\n";
-        calib << "  \"body_T_sensor\": "
-              << isometryToJsonArray(camera->body_T_sensor()) << "\n";
-        calib << "}\n";
-        calib_written_ = true;
-      } else {
-        VLOG(1) << "[AgentImageExtractor] Sensor is not a Camera; skipping "
-                   "calibration export (reprojection will be unavailable).";
-      }
+    // Write the run-level calibration once. It is constant for a fixed camera, so we
+    // keep it out of the per-keyframe metadata.
+    if (!calib_written_ && calib) {
+      std::filesystem::path calib_path =
+          std::filesystem::path(config.image_output_path) / "camera_calib.json";
+      std::ofstream out(calib_path);
+      out << std::setprecision(17);
+      out << "{\n";
+      out << "  \"fx\": " << calib->fx << ",\n";
+      out << "  \"fy\": " << calib->fy << ",\n";
+      out << "  \"cx\": " << calib->cx << ",\n";
+      out << "  \"cy\": " << calib->cy << ",\n";
+      out << "  \"width\": " << calib->width << ",\n";
+      out << "  \"height\": " << calib->height << ",\n";
+      out << "  \"depth_scale\": " << kDepthScaleMetersPerUnit << ",\n";
+      out << "  \"depth_encoding\": \"" << kDepthEncoding << "\",\n";
+      out << "  \"body_T_sensor\": " << isometryToJsonArray(calib->body_T_sensor)
+          << "\n";
+      out << "}\n";
+      calib_written_ = true;
     }
 
-    // Save RGB (OpenCV uses BGR)
-    if (!sensor_data.color_image.empty()) {
-      cv::Mat rgb_image;
-      if (sensor_data.color_image.channels() == 3) {
-        cv::cvtColor(sensor_data.color_image, rgb_image, cv::COLOR_RGB2BGR);
-      } else {
-        rgb_image = sensor_data.color_image.clone();
-      }
-      cv::imwrite(base_path.string() + "_rgb.jpg", rgb_image);
+    // Images are already in their on-disk form (see addFrame).
+    if (!frame.color_bgr.empty()) {
+      cv::imwrite(base_path.string() + "_rgb.jpg", frame.color_bgr);
     }
 
-    // Save Depth losslessly. After input conversion depth_image is CV_32FC1 in
-    // meters (see input_conversion.cpp); PNG cannot store float, so we convert
-    // to 16-bit millimeters to round-trip cleanly.
-    if (!sensor_data.depth_image.empty()) {
-      const cv::Mat& depth = sensor_data.depth_image;
-      cv::Mat depth_to_save;
-      if (depth.type() == CV_32FC1) {
-        depth.convertTo(depth_to_save, CV_16UC1, 1.0 / kDepthScaleMetersPerUnit);
-      } else {
-        // Already integer depth (assumed millimeters); store as-is.
-        depth_to_save = depth;
-      }
-      cv::imwrite(base_path.string() + "_depth.png", depth_to_save);
+    if (!frame.depth_mm.empty()) {
+      cv::imwrite(base_path.string() + "_depth.png", frame.depth_mm);
     }
 
     // Per-keyframe metadata: dynamic data only (pose + file references). Static
@@ -327,7 +379,7 @@ void AgentImageExtractor::updateGraph(DynamicSceneGraph& graph,
       meta << "{\n";
       meta << "  \"timestamp_ns\": " << attrs.timestamp.count() << ",\n";
       meta << "  \"frame_timestamp_ns\": " << frame.timestamp_ns << ",\n";
-      meta << "  \"world_T_body\": " << isometryToJsonArray(sensor_data.world_T_body)
+      meta << "  \"world_T_body\": " << isometryToJsonArray(frame.world_T_body)
            << ",\n";
       meta << "  \"rgb_file\": \"" << name << "_rgb.jpg\",\n";
       meta << "  \"depth_file\": \"" << name << "_depth.png\",\n";

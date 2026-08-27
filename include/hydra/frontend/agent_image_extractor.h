@@ -29,7 +29,10 @@
 #include <hydra/active_window/active_window_output.h>
 #include <hydra/common/dsg_types.h>
 #include <hydra/common/output_sink.h>
+#include <hydra/frontend/keyframe_writer.h>
 #include <spark_dsg/dynamic_scene_graph.h>
+
+#include <opencv2/core/mat.hpp>
 
 #include <deque>
 #include <memory>
@@ -69,9 +72,16 @@ class AgentImageExtractor {
 
     // Number of recent sensor frames retained for pairing. The frontend collates
     // several active-window outputs into a single spin when it falls behind, so the
-    // buffer has to span the worst-case backlog. Frames are held by shared_ptr, so
-    // this bounds how much imagery the extractor keeps alive.
-    size_t max_buffered_frames = 30;
+    // buffer has to span the worst-case collation batch. Each entry owns a private
+    // copy of the two images it will write, so this directly bounds the extractor's
+    // memory (roughly 2 MB per entry at VGA).
+    size_t max_buffered_frames = 15;
+
+    // How many consecutive updates a single agent node may hold up the queue while
+    // waiting for its sensor frame to arrive. Once exceeded the node is abandoned so
+    // the nodes behind it can drain: a head node whose frame never comes must never
+    // be able to stall keyframe writing indefinitely.
+    size_t max_deferred_updates = 10;
   } const config;
 
   explicit AgentImageExtractor(const Config& config);
@@ -97,9 +107,22 @@ class AgentImageExtractor {
  private:
   //! One buffered sensor frame, keyed by the active-window output timestamp (which is
   //! also the timestamp the pose graph tracker stamps its agent nodes with).
+  //!
+  //! Everything here is OWNED outright. Retaining the packet's InputData instead would
+  //! share cv::Mat pixel buffers with the active window's frame data (khronos builds
+  //! sensor_data as a shallow copy of FrameData::input,
+  //! khronos/src/active_window/active_window.cpp:211), which keeps buffers alive past
+  //! the point FrameDataBuffer::trimBuffer believes it freed them and leaves this
+  //! module reading pixels that khronos' detached object-extraction workers can still
+  //! reach. The images are stored in the exact form they get written in, so the format
+  //! conversions double as the deep copy and cost nothing extra.
   struct BufferedFrame {
     uint64_t timestamp_ns = 0;
-    std::shared_ptr<InputData> data;
+    //! Color in BGR, ready for cv::imwrite.
+    cv::Mat color_bgr;
+    //! Depth as 16-bit millimeters, ready for cv::imwrite.
+    cv::Mat depth_mm;
+    Eigen::Isometry3d world_T_body = Eigen::Isometry3d::Identity();
   };
 
   //! Index of the buffered frame nearest to timestamp_ns at or after search_start, or
@@ -116,6 +139,15 @@ class AgentImageExtractor {
 
   //! Whether the run-level camera_calib.json has been written yet.
   bool calib_written_ = false;
+
+  //! Calibration captured by value on the producing thread, where the sensor is known
+  //! to be valid. Copied rather than retained so nothing outlives this module.
+  std::optional<CameraCalib> calib_;
+
+  //! Agent node currently holding up the queue, and for how many updates. Bounds the
+  //! deferral so a node whose frame never arrives cannot block the ones behind it.
+  uint64_t deferred_node_ns_ = 0;
+  size_t deferred_count_ = 0;
 
   //! Timestamp of the newest agent node we have already made a decision about (written
   //! a keyframe for, gated out, or given up on). Nodes are visited in time order, so

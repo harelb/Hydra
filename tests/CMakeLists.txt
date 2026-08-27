@@ -22,6 +22,7 @@ add_executable(
   common/test_config_utilities.cpp
   common/test_graph_update.cpp
   common/test_shared_dsg_info.cpp
+  frontend/test_agent_image_extractor.cpp
   frontend/test_graph_connector.cpp
   frontend/test_keyframe_gate.cpp
   frontend/test_keyframe_writer.cpp
