@@ -1,0 +1,20 @@
+target_sources(
+  ${PROJECT_NAME}
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gvd_places/graph_extractor.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/gvd_places/graph_extractor_utilities.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/gvd_places/gvd_graph.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/gvd_places/gvd_integrator.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/gvd_places/gvd_merge_policies.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/gvd_places/gvd_parent_tracker.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/gvd_places/gvd_utilities.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/gvd_places/gvd_voxel.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/robot_footprint_integrator.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/block_traversability_clustering.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/region_growing_traversability_clustering.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/traversability_estimator.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/traversability_postprocessing.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/2d_places/ellipsoid_math.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/2d_places/index_remapping.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/2d_places/place_reallocation.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/2d_places/place_splitting.cpp
+)

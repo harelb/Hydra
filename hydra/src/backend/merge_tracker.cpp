@@ -1,0 +1,241 @@
+/* -----------------------------------------------------------------------------
+ * Copyright 2022 Massachusetts Institute of Technology.
+ * All Rights Reserved
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ *  1. Redistributions of source code must retain the above copyright notice,
+ *     this list of conditions and the following disclaimer.
+ *
+ *  2. Redistributions in binary form must reproduce the above copyright notice,
+ *     this list of conditions and the following disclaimer in the documentation
+ *     and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Research was sponsored by the United States Air Force Research Laboratory and
+ * the United States Air Force Artificial Intelligence Accelerator and was
+ * accomplished under Cooperative Agreement Number FA8750-19-2-1000. The views
+ * and conclusions contained in this document are those of the authors and should
+ * not be interpreted as representing the official policies, either expressed or
+ * implied, of the United States Air Force or the U.S. Government. The U.S.
+ * Government is authorized to reproduce and distribute reprints for Government
+ * purposes notwithstanding any copyright notation herein.
+ * -------------------------------------------------------------------------- */
+#include "hydra/backend/merge_tracker.h"
+
+#include <glog/logging.h>
+#include <spark_dsg/node_symbol.h>
+
+using namespace spark_dsg;
+
+namespace hydra {
+
+size_t MergeTracker::applyMerges(const SceneGraph& unmerged,
+                                 const MergeList& proposals,
+                                 SharedDsgInfo& dsg,
+                                 const MergeFunc& merge_attrs) {
+  auto& prior_merges = dsg.merges;
+
+  size_t num_applied = 0;
+  auto& graph = *dsg.graph;
+  std::set<NodeId> to_update;
+  for (const auto& orig_merge : proposals) {
+    const auto merge = orig_merge.remap(prior_merges);
+    if (merge.from == merge.to) {
+      VLOG(10) << "Found present merge: " << orig_merge << " (remapped: " << merge
+               << ")";
+      to_update.insert(merge.to);
+      continue;
+    }
+
+    if (!graph.mergeNodes(merge.from, merge.to)) {
+      LOG(WARNING) << "Failed to apply merge: " << merge << " (original: " << orig_merge
+                   << ", from: " << std::boolalpha << graph.hasNode(merge.from)
+                   << ", to: " << graph.hasNode(merge.to) << ")";
+      continue;
+    }
+
+    VLOG(5) << "Applied merge: " << merge << " (original: " << orig_merge << ")";
+
+    ++num_applied;
+    to_update.insert(merge.to);
+    updateParents(prior_merges, merge);
+  }
+
+  if (!merge_attrs) {
+    VLOG_IF(1, num_applied > 0)
+        << "[merge-tracker] applied=" << num_applied << " but no merge_attrs hook";
+    return num_applied;
+  }
+
+  VLOG_IF(1, !to_update.empty())
+      << "[merge-tracker] applied=" << num_applied
+      << " to_update=" << to_update.size();
+  for (const auto& node : to_update) {
+    auto iter = merge_sets_.find(node);
+    if (iter == merge_sets_.end()) {
+      VLOG(1) << "[merge-tracker] no merge set for " << NodeSymbol(node).str();
+      continue;
+    }
+
+    // the frontend can delete nodes, so the recorded parent may be gone from either
+    // graph; the merged attributes can never be rebuilt again in that case
+    if (!unmerged.hasNode(node) || !graph.hasNode(node)) {
+      VLOG(1) << "[merge-tracker] dropping merge set for missing parent "
+              << NodeSymbol(node).str();
+      merge_sets_.erase(iter);
+      continue;
+    }
+
+    auto child_iter = iter->second.begin();
+    while (child_iter != iter->second.end()) {
+      if (!unmerged.hasNode(*child_iter)) {
+        child_iter = iter->second.erase(child_iter);
+      } else {
+        ++child_iter;
+      }
+    }
+
+    std::vector<NodeId> nodes{node};
+    nodes.insert(nodes.end(), iter->second.begin(), iter->second.end());
+    auto attrs = merge_attrs(unmerged, nodes);
+    if (attrs) {
+      graph.setNodeAttributes(node, std::move(attrs));
+    }
+  }
+
+  return num_applied;
+}
+
+void MergeTracker::updateAllMergeAttributes(const SceneGraph& unmerged,
+                                            SceneGraph& merged,
+                                            const MergeFunc& merge_attrs) {
+  VLOG_IF(1, !merge_sets_.empty())
+      << "[merge-tracker] updateAllMergeAttributes over " << merge_sets_.size()
+      << " merge sets";
+  auto iter = merge_sets_.begin();
+  while (iter != merge_sets_.end()) {
+    const auto parent = iter->first;
+    // the frontend can delete nodes, so the recorded parent may be gone from either
+    // graph; the merged attributes can never be rebuilt again in that case
+    if (!unmerged.hasNode(parent) || !merged.hasNode(parent)) {
+      VLOG(1) << "[merge-tracker] dropping merge set for missing parent "
+              << NodeSymbol(parent).str();
+      iter = merge_sets_.erase(iter);
+      continue;
+    }
+
+    auto& children = iter->second;
+    auto child_iter = children.begin();
+    while (child_iter != children.end()) {
+      if (!unmerged.hasNode(*child_iter)) {
+        child_iter = children.erase(child_iter);
+      } else {
+        ++child_iter;
+      }
+    }
+
+    std::vector<NodeId> nodes{parent};
+    nodes.insert(nodes.end(), children.begin(), children.end());
+    auto attrs = merge_attrs(unmerged, nodes);
+    if (attrs) {
+      merged.setNodeAttributes(parent, std::move(attrs));
+    }
+    ++iter;
+  }
+}
+
+std::string MergeTracker::print() const {
+  std::stringstream ss;
+  for (const auto& [parent, children] : merge_sets_) {
+    ss << " - " << NodeSymbol(parent).str() << ": [";
+    auto iter = children.begin();
+    while (iter != children.end()) {
+      ss << NodeSymbol(*iter).str();
+      ++iter;
+      if (iter != children.end()) {
+        ss << ", ";
+      }
+    }
+    ss << "]\n";
+  }
+
+  return ss.str();
+}
+
+void MergeTracker::clear() { merge_sets_.clear(); }
+
+void MergeTracker::erase_nodes(std::vector<NodeId> nodes_to_erase) {
+  for (auto n : nodes_to_erase) {
+    merge_sets_.erase(n);
+  }
+}
+
+void MergeTracker::updateParents(std::map<NodeId, NodeId>& prior_merges,
+                                 const Merge& merge) {
+  // look up (and maybe initialize new parent)
+  auto to_iter = merge_sets_.find(merge.to);
+  if (to_iter == merge_sets_.end()) {
+    to_iter = merge_sets_.emplace(merge.to, std::set<NodeId>()).first;
+  }
+
+  // record merge parent
+  to_iter->second.insert(merge.from);
+  prior_merges[merge.from] = merge.to;
+
+  // find prior merges
+  auto from_iter = merge_sets_.find(merge.from);
+  if (from_iter == merge_sets_.end()) {
+    return;  // no previous merges
+  }
+
+  // rewire old merges
+  for (const auto& child : from_iter->second) {
+    prior_merges[child] = merge.to;
+    to_iter->second.insert(child);
+  }
+
+  merge_sets_.erase(from_iter);
+}
+
+void GroupedMergeTracker::initializeTracker(std::string name) {
+  group_to_tracker_.insert({name, MergeTracker()});
+}
+
+void GroupedMergeTracker::clear() {
+  for (auto& [name, tracker] : group_to_tracker_) {
+    tracker.clear();
+  }
+}
+
+void GroupedMergeTracker::erase_nodes(std::vector<NodeId> nodes) {
+  for (auto& [name, tracker] : group_to_tracker_) {
+    tracker.erase_nodes(nodes);
+  }
+}
+
+std::string GroupedMergeTracker::print() const {
+  std::stringstream ss;
+  for (auto& [name, tracker] : group_to_tracker_) {
+    ss << "Group '" << name << "' merges:\n" << tracker.print();
+  }
+
+  return ss.str();
+}
+
+MergeTracker& GroupedMergeTracker::getMergeGroup(std::string name) {
+  return group_to_tracker_.at(name);
+}
+
+}  // namespace hydra

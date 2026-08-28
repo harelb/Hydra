@@ -1,0 +1,375 @@
+/* -----------------------------------------------------------------------------
+ * Copyright 2022 Massachusetts Institute of Technology.
+ * All Rights Reserved
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ *  1. Redistributions of source code must retain the above copyright notice,
+ *     this list of conditions and the following disclaimer.
+ *
+ *  2. Redistributions in binary form must reproduce the above copyright notice,
+ *     this list of conditions and the following disclaimer in the documentation
+ *     and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Research was sponsored by the United States Air Force Research Laboratory and
+ * the United States Air Force Artificial Intelligence Accelerator and was
+ * accomplished under Cooperative Agreement Number FA8750-19-2-1000. The views
+ * and conclusions contained in this document are those of the authors and should
+ * not be interpreted as representing the official policies, either expressed or
+ * implied, of the United States Air Force or the U.S. Government. The U.S.
+ * Government is authorized to reproduce and distribute reprints for Government
+ * purposes notwithstanding any copyright notation herein.
+ * -------------------------------------------------------------------------- */
+#include "hydra/backend/updates/update_region_growing_traversability_functor.h"
+
+#include <config_utilities/config.h>
+#include <config_utilities/validation.h>
+#include <spark_dsg/node_attributes.h>
+#include <spark_dsg/traversability_boundary.h>
+
+#include <algorithm>
+#include <cmath>
+#include <queue>
+
+#include "hydra/common/global_info.h"
+#include "hydra/utils/nearest_neighbor_utilities.h"
+#include "hydra/utils/timing_utilities.h"
+
+using namespace spark_dsg;
+
+namespace hydra {
+
+using Timer = timing::ScopedTimer;
+using spark_dsg::TravNodeAttributes;
+
+void declare_config(UpdateRegionGrowingTraversabilityFunctor::Config& config) {
+  using namespace config;
+  name("UpdateRegionGrowingTraversabilityFunctor::Config");
+  base<VerbosityConfig>(config);
+  field(config.layer, "layer");
+  field(config.max_connection_distance_m, "max_connection_distance_m", "m");
+  field(config.max_connection_gap_m, "max_connection_gap_m", "m");
+  field(config.require_traversable_boundary, "require_traversable_boundary");
+  field(config.deformation, "deformation");
+
+  check(config.max_connection_distance_m, GE, 0.0, "max_connection_distance_m");
+  check(config.max_connection_gap_m, GE, 0.0, "max_connection_gap_m");
+}
+
+static const auto registration =
+    config::RegistrationWithConfig<UpdateFunctor,
+                                   UpdateRegionGrowingTraversabilityFunctor,
+                                   UpdateRegionGrowingTraversabilityFunctor::Config>(
+        "UpdateRegionGrowingTraversabilityFunctor");
+
+UpdateRegionGrowingTraversabilityFunctor::UpdateRegionGrowingTraversabilityFunctor(
+    const Config& config)
+    : config(config::checkValid(config)),
+      deformation_interpolator_(config.deformation) {}
+
+UpdateFunctor::Hooks UpdateRegionGrowingTraversabilityFunctor::hooks() const {
+  auto my_hooks = UpdateFunctor::hooks();
+  my_hooks.find_merges = [this](const SceneGraph& dsg,
+                                const UpdateInfo::ConstPtr& info) {
+    return findNodeMerges(dsg, info);
+  };
+  my_hooks.merge = [this](const SceneGraph& dsg,
+                          const std::vector<NodeId>& merge_ids) {
+    auto attrs = mergeNodes(dsg, merge_ids);
+    if (attrs) {
+      // the merged attributes are cloned from the odometric unmerged graph;
+      // re-apply the surviving node's last deformation so the merge result stays
+      // in the optimized frame
+      deformation_interpolator_.applyLastTransform(merge_ids.front(), *attrs);
+    }
+    return attrs;
+  };
+  my_hooks.cleanup = [this](const UpdateInfo::ConstPtr& info,
+                            SceneGraph&,
+                            SharedDsgInfo* dsg) { cleanup(info, dsg); };
+  return my_hooks;
+}
+
+void UpdateRegionGrowingTraversabilityFunctor::call(
+    const SceneGraph& unmerged,
+    SharedDsgInfo& dsg,
+    const UpdateInfo::ConstPtr& info) const {
+  Timer timer("backend/update_traversability", info->timestamp_ns);
+  if (!unmerged.hasLayer(config.layer)) {
+    return;
+  }
+
+  // Update global poses (deformation) of all nodes.
+  updateDeformation(unmerged, dsg, info);
+
+  // In the case of loop closures, reset all added edges.
+  merge_candidates_.clear();
+  if (info->loop_closure_detected) {
+    resetAddedEdges(*dsg.graph);
+    findInactiveEdges(*dsg.graph);
+  }
+
+  // Find and update all edges from active to inactive nodes.
+  findActiveWindowEdges(*dsg.graph);
+
+  // Remove active window edges that no longer overlap and archive ones that are now
+  // inactive.
+  if (info->loop_closure_detected) {
+    return;
+  }
+  pruneActiveWindowEdges(*dsg.graph);
+}
+
+void UpdateRegionGrowingTraversabilityFunctor::updateDeformation(
+    const SceneGraph& unmerged,
+    SharedDsgInfo& dsg,
+    const UpdateInfo::ConstPtr& info) const {
+  // Update global poses (deformation) of all nodes.
+  const auto& places = unmerged.getLayer(config.layer);
+  const auto view =
+      info->loop_closure_detected ? LayerView(places) : activeNodes(places);
+  deformation_interpolator_.interpolateNodePositions(unmerged, *dsg.graph, info, view);
+}
+
+void UpdateRegionGrowingTraversabilityFunctor::resetAddedEdges(SceneGraph& dsg) const {
+  EdgeSet to_remove;
+  for (const auto& [key, edge] : dsg.getLayer(config.layer).edges()) {
+    if (edge.attributes<EdgeAttributes>().weight < 0.0) {
+      to_remove.insert(key);
+    }
+  }
+  for (const auto& edge_key : to_remove) {
+    dsg.removeEdge(edge_key.k1, edge_key.k2);
+  }
+  active_edges_.clear();
+}
+
+void UpdateRegionGrowingTraversabilityFunctor::findInactiveEdges(
+    SceneGraph& dsg) const {
+  EdgeSet visited;
+  for (const auto& [from_id, node] : dsg.getLayer(config.layer).nodes()) {
+    const auto& from_attrs = node->attributes<TravNodeAttributes>();
+    if (from_attrs.is_active) {
+      continue;
+    }
+
+    // Find all overlapping inactive nodes.
+    for (const auto to_id : findConnections(dsg, from_attrs)) {
+      const EdgeKey edge_key(from_id, to_id);
+      if (visited.count(edge_key)) {
+        continue;
+      }
+      const auto& to_attrs = dsg.getNode(to_id).attributes<TravNodeAttributes>();
+      if (to_attrs.is_active) {
+        continue;
+      }
+
+      visited.insert(edge_key);
+      if (areConnected(from_attrs, to_attrs)) {
+        // NOTE(lschmid): Weight of -2 indicates this is an inactive overlap edge.
+        dsg.addOrUpdateEdge(from_id, to_id, std::make_unique<EdgeAttributes>(-2.0));
+        merge_candidates_.insert(edge_key);
+      }
+    }
+  }
+}
+
+void UpdateRegionGrowingTraversabilityFunctor::findActiveWindowEdges(
+    SceneGraph& dsg) const {
+  active_edges_.clear();
+  const auto& layer = dsg.getLayer(config.layer);
+  for (const auto& node : activeNodes(layer)) {
+    const auto& from_attrs = node.attributes<TravNodeAttributes>();
+    for (const auto to_id : findConnections(dsg, from_attrs)) {
+      // NOTE(lschmid): Weight of -1 indicates this is an AW edge.
+      dsg.addOrUpdateEdge(node.id, to_id, std::make_unique<EdgeAttributes>(-1.0));
+      active_edges_.insert(EdgeKey(node.id, to_id));
+    }
+  }
+}
+
+void UpdateRegionGrowingTraversabilityFunctor::pruneActiveWindowEdges(
+    SceneGraph& dsg) const {
+  EdgeSet to_remove;
+  for (const auto& [edge_key, edge] : dsg.getLayer(config.layer).edges()) {
+    if (active_edges_.count(edge_key) || edge.attributes().weight != -1.0) {
+      continue;
+    }
+    // Previously active edges to revisit
+    const auto& attrs_1 = dsg.getNode(edge_key.k1).attributes<TravNodeAttributes>();
+    const auto& attrs_2 = dsg.getNode(edge_key.k2).attributes<TravNodeAttributes>();
+    if (!areConnected(attrs_1, attrs_2)) {
+      to_remove.insert(edge_key);
+      continue;
+    }
+
+    if (!attrs_1.is_active && !attrs_2.is_active) {
+      // Move to inactive edges.
+      dsg.getEdge(edge_key.k1, edge_key.k2).attributes().weight = -2.0;
+      merge_candidates_.insert(edge_key);
+    }
+  }
+
+  for (const auto& edge_key : to_remove) {
+    dsg.removeEdge(edge_key.k1, edge_key.k2);
+  }
+}
+
+MergeList UpdateRegionGrowingTraversabilityFunctor::findNodeMerges(
+    const SceneGraph& dsg, const UpdateInfo::ConstPtr& /* info */) const {
+  // TODO(lschmid): Consider an incremental version in the future.
+  MergeList result;
+  std::set<NodeId> merged;
+  // Candidates are all inactive connections, as these already overlap.
+  for (const auto& edge_key : merge_candidates_) {
+    if (merged.count(edge_key.k1) || merged.count(edge_key.k2)) {
+      continue;
+    }
+
+    const auto& from_attrs = dsg.getNode(edge_key.k1).attributes<TravNodeAttributes>();
+    const auto& to_attrs = dsg.getNode(edge_key.k2).attributes<TravNodeAttributes>();
+
+    // Check boundaries. Merge if the centroids are included in the other's radius. If
+    // both are included, keep the larger one.
+    const bool from_included = from_attrs.contains(to_attrs.position);
+    const bool to_included = to_attrs.contains(from_attrs.position);
+    if (!to_included && !from_included) {
+      continue;
+    }
+
+    if (!from_included || to_attrs.area() > from_attrs.area()) {
+      // Merge from -> to
+      result.push_back({edge_key.k1, edge_key.k2});
+      merged.insert(edge_key.k1);
+    } else {
+      result.push_back({edge_key.k2, edge_key.k1});
+      merged.insert(edge_key.k2);
+    }
+  }
+  return result;
+}
+
+NodeAttributes::Ptr UpdateRegionGrowingTraversabilityFunctor::mergeNodes(
+    const SceneGraph& dsg, const std::vector<NodeId>& merge_ids) const {
+  auto result = dsg.getNode(merge_ids.front()).attributes().clone();
+  return result;
+}
+
+void UpdateRegionGrowingTraversabilityFunctor::cleanup(const UpdateInfo::ConstPtr&,
+                                                       SharedDsgInfo*) const {}
+
+std::vector<NodeId> UpdateRegionGrowingTraversabilityFunctor::findConnections(
+    const SceneGraph& dsg, const TravNodeAttributes& from_attrs) const {
+  std::vector<NodeId> connections;
+  // NOTE(lschmid): Radius search doesn't work right, brute force for now.
+  for (const auto& [to_id, to_node] : dsg.getLayer(config.layer).nodes()) {
+    const auto& to_attrs = to_node->attributes<TravNodeAttributes>();
+    if (hasActiveOverlap(from_attrs, to_attrs)) {
+      continue;
+    }
+    if (areConnected(from_attrs, to_attrs)) {
+      connections.emplace_back(to_id);
+    }
+  }
+  return connections;
+}
+
+bool UpdateRegionGrowingTraversabilityFunctor::areConnected(
+    const TravNodeAttributes& attrs1, const TravNodeAttributes& attrs2) const {
+  // The polygon overlap test is authoritative: whatever it accepts is a real overlap.
+  if (attrs1.intersects(attrs2)) {
+    return true;
+  }
+  return isNearlyTouching(attrs1, attrs2);
+}
+
+bool UpdateRegionGrowingTraversabilityFunctor::isNearlyTouching(
+    const TravNodeAttributes& attrs1, const TravNodeAttributes& attrs2) const {
+  if (config.max_connection_distance_m <= 0.0) {
+    return false;
+  }
+
+  const Eigen::Vector3d one_to_two = attrs2.position - attrs1.position;
+  const double distance = one_to_two.norm();
+  if (distance <= 0.0 || distance > config.max_connection_distance_m) {
+    return false;
+  }
+
+  // NOTE(harel): Proximity alone would happily link two places on opposite sides of a
+  // wall. We instead require that walking from one centroid towards the other leaves
+  // each place's own boundary in that direction, and that the two exit points nearly
+  // meet. Both boundaries are inner approximations (see max_connection_distance_m), so
+  // the residual gap is a slack parameter rather than a true free-space distance.
+  const double reach_1 = boundaryReach(attrs1, one_to_two);
+  if (reach_1 < 0.0) {
+    return false;
+  }
+  const double reach_2 = boundaryReach(attrs2, -one_to_two);
+  if (reach_2 < 0.0) {
+    return false;
+  }
+
+  return distance - reach_1 - reach_2 <= config.max_connection_gap_m;
+}
+
+double UpdateRegionGrowingTraversabilityFunctor::boundaryReach(
+    const TravNodeAttributes& attrs, const Eigen::Vector3d& direction_L) const {
+  const size_t num_bins = attrs.radii.size();
+  if (num_bins == 0) {
+    return -1.0;
+  }
+
+  // Same bin interpolation as TravNodeAttributes::contains().
+  const double bin = attrs.getBinPercentage(direction_L) * num_bins;
+  const size_t bin_left =
+      std::min(static_cast<size_t>(std::floor(bin)), num_bins - 1);
+  const size_t bin_right = (bin_left + 1) % num_bins;
+
+  if (config.require_traversable_boundary) {
+    if (attrs.states.size() != num_bins) {
+      // No state information: refuse to bridge rather than guess.
+      return -1.0;
+    }
+    // The two bins bracketing the ray give us the angular resolution of the boundary
+    // (~18 deg by default) as tolerance; either one being traversable is evidence of
+    // free space towards the other place.
+    if (attrs.states[bin_left] != State::TRAVERSABLE &&
+        attrs.states[bin_right] != State::TRAVERSABLE) {
+      return -1.0;
+    }
+  }
+
+  return attrs.radii[bin_left] +
+         (attrs.radii[bin_right] - attrs.radii[bin_left]) *
+             (bin - static_cast<double>(bin_left));
+}
+
+bool UpdateRegionGrowingTraversabilityFunctor::hasActiveOverlap(
+    const TravNodeAttributes& attrs1, const TravNodeAttributes& attrs2) {
+  // TODO(lschmid): Double check this is correct.
+  if (attrs1.last_observed_ns < attrs2.first_observed_ns ||
+      attrs1.first_observed_ns > attrs2.last_observed_ns) {
+    return false;
+  }
+  return true;
+}
+
+LayerView UpdateRegionGrowingTraversabilityFunctor::activeNodes(
+    const SceneGraphLayer& layer) {
+  return LayerView(
+      layer, [](const SceneGraphNode& node) { return node.attributes().is_active; });
+}
+
+}  // namespace hydra
