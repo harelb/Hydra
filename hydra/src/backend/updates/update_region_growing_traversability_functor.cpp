@@ -160,7 +160,7 @@ void UpdateRegionGrowingTraversabilityFunctor::findInactiveEdges(
     SceneGraph& dsg) const {
   EdgeSet visited;
   for (const auto& [from_id, node] : dsg.getLayer(config.layer).nodes()) {
-    const auto& from_attrs = node->attributes<TravNodeAttributes>();
+    const auto& from_attrs = node->attributes<spark_dsg::TravNodeAttributes>();
     if (from_attrs.is_active) {
       continue;
     }
@@ -171,7 +171,7 @@ void UpdateRegionGrowingTraversabilityFunctor::findInactiveEdges(
       if (visited.count(edge_key)) {
         continue;
       }
-      const auto& to_attrs = dsg.getNode(to_id).attributes<TravNodeAttributes>();
+      const auto& to_attrs = dsg.getNode(to_id).attributes<spark_dsg::TravNodeAttributes>();
       if (to_attrs.is_active) {
         continue;
       }
@@ -191,7 +191,7 @@ void UpdateRegionGrowingTraversabilityFunctor::findActiveWindowEdges(
   active_edges_.clear();
   const auto& layer = dsg.getLayer(config.layer);
   for (const auto& node : activeNodes(layer)) {
-    const auto& from_attrs = node.attributes<TravNodeAttributes>();
+    const auto& from_attrs = node.attributes<spark_dsg::TravNodeAttributes>();
     for (const auto to_id : findConnections(dsg, from_attrs)) {
       // NOTE(lschmid): Weight of -1 indicates this is an AW edge.
       dsg.addOrUpdateEdge(node.id, to_id, std::make_unique<EdgeAttributes>(-1.0));
@@ -208,8 +208,8 @@ void UpdateRegionGrowingTraversabilityFunctor::pruneActiveWindowEdges(
       continue;
     }
     // Previously active edges to revisit
-    const auto& attrs_1 = dsg.getNode(edge_key.k1).attributes<TravNodeAttributes>();
-    const auto& attrs_2 = dsg.getNode(edge_key.k2).attributes<TravNodeAttributes>();
+    const auto& attrs_1 = dsg.getNode(edge_key.k1).attributes<spark_dsg::TravNodeAttributes>();
+    const auto& attrs_2 = dsg.getNode(edge_key.k2).attributes<spark_dsg::TravNodeAttributes>();
     if (!areConnected(attrs_1, attrs_2)) {
       to_remove.insert(edge_key);
       continue;
@@ -238,8 +238,8 @@ MergeList UpdateRegionGrowingTraversabilityFunctor::findNodeMerges(
       continue;
     }
 
-    const auto& from_attrs = dsg.getNode(edge_key.k1).attributes<TravNodeAttributes>();
-    const auto& to_attrs = dsg.getNode(edge_key.k2).attributes<TravNodeAttributes>();
+    const auto& from_attrs = dsg.getNode(edge_key.k1).attributes<spark_dsg::TravNodeAttributes>();
+    const auto& to_attrs = dsg.getNode(edge_key.k2).attributes<spark_dsg::TravNodeAttributes>();
 
     // Check boundaries. Merge if the centroids are included in the other's radius. If
     // both are included, keep the larger one.
@@ -271,11 +271,11 @@ void UpdateRegionGrowingTraversabilityFunctor::cleanup(const UpdateInfo::ConstPt
                                                        SharedDsgInfo*) const {}
 
 std::vector<NodeId> UpdateRegionGrowingTraversabilityFunctor::findConnections(
-    const SceneGraph& dsg, const TravNodeAttributes& from_attrs) const {
+    const SceneGraph& dsg, const spark_dsg::TravNodeAttributes& from_attrs) const {
   std::vector<NodeId> connections;
   // NOTE(lschmid): Radius search doesn't work right, brute force for now.
   for (const auto& [to_id, to_node] : dsg.getLayer(config.layer).nodes()) {
-    const auto& to_attrs = to_node->attributes<TravNodeAttributes>();
+    const auto& to_attrs = to_node->attributes<spark_dsg::TravNodeAttributes>();
     if (hasActiveOverlap(from_attrs, to_attrs)) {
       continue;
     }
@@ -287,7 +287,7 @@ std::vector<NodeId> UpdateRegionGrowingTraversabilityFunctor::findConnections(
 }
 
 bool UpdateRegionGrowingTraversabilityFunctor::areConnected(
-    const TravNodeAttributes& attrs1, const TravNodeAttributes& attrs2) const {
+    const spark_dsg::TravNodeAttributes& attrs1, const spark_dsg::TravNodeAttributes& attrs2) const {
   // The polygon overlap test is authoritative: whatever it accepts is a real overlap.
   if (attrs1.intersects(attrs2)) {
     return true;
@@ -296,7 +296,7 @@ bool UpdateRegionGrowingTraversabilityFunctor::areConnected(
 }
 
 bool UpdateRegionGrowingTraversabilityFunctor::isNearlyTouching(
-    const TravNodeAttributes& attrs1, const TravNodeAttributes& attrs2) const {
+    const spark_dsg::TravNodeAttributes& attrs1, const spark_dsg::TravNodeAttributes& attrs2) const {
   if (config.max_connection_distance_m <= 0.0) {
     return false;
   }
@@ -325,13 +325,13 @@ bool UpdateRegionGrowingTraversabilityFunctor::isNearlyTouching(
 }
 
 double UpdateRegionGrowingTraversabilityFunctor::boundaryReach(
-    const TravNodeAttributes& attrs, const Eigen::Vector3d& direction_L) const {
+    const spark_dsg::TravNodeAttributes& attrs, const Eigen::Vector3d& direction_L) const {
   const size_t num_bins = attrs.radii.size();
   if (num_bins == 0) {
     return -1.0;
   }
 
-  // Same bin interpolation as TravNodeAttributes::contains().
+  // Same bin interpolation as spark_dsg::TravNodeAttributes::contains().
   const double bin = attrs.getBinPercentage(direction_L) * num_bins;
   const size_t bin_left =
       std::min(static_cast<size_t>(std::floor(bin)), num_bins - 1);
@@ -357,7 +357,7 @@ double UpdateRegionGrowingTraversabilityFunctor::boundaryReach(
 }
 
 bool UpdateRegionGrowingTraversabilityFunctor::hasActiveOverlap(
-    const TravNodeAttributes& attrs1, const TravNodeAttributes& attrs2) {
+    const spark_dsg::TravNodeAttributes& attrs1, const spark_dsg::TravNodeAttributes& attrs2) {
   // TODO(lschmid): Double check this is correct.
   if (attrs1.last_observed_ns < attrs2.first_observed_ns ||
       attrs1.first_observed_ns > attrs2.last_observed_ns) {

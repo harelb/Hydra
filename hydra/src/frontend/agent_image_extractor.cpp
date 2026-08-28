@@ -37,6 +37,9 @@
 #include "hydra/common/global_info.h"
 #include "hydra/input/camera.h"
 
+// hydra/common/dsg_types.h (deleted upstream in #174) used to supply this
+using namespace spark_dsg;
+
 namespace hydra {
 
 namespace {
@@ -200,8 +203,8 @@ std::optional<size_t> AgentImageExtractor::findFrame(
   return best;
 }
 
-void AgentImageExtractor::updateGraph(SceneGraph& graph,
-                                     const ActiveWindowOutput&) {
+void AgentImageExtractor::updateGraph(spark_dsg::SceneGraph& graph,
+                                      const ActiveWindowOutput&) {
   // NOTE(harel): deliberately does NOT call addFrame. GraphBuilder::processNextInput
   // already buffered this packet (and the ones collated away with it) on the active
   // window's thread; calling it here as well would only add a second concurrent

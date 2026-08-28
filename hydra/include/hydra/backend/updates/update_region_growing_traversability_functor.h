@@ -146,16 +146,16 @@ struct UpdateRegionGrowingTraversabilityFunctor : public UpdateFunctor {
    * their boundaries overlap or (optionally) they nearly touch along the ray joining
    * them. Symmetric in its arguments.
    */
-  bool areConnected(const TravNodeAttributes& attrs1,
-                    const TravNodeAttributes& attrs2) const;
+  bool areConnected(const spark_dsg::TravNodeAttributes& attrs1,
+                    const spark_dsg::TravNodeAttributes& attrs2) const;
 
   /**
    * @brief Proximity fallback for areConnected: two places are linked if their
    * centroids are within max_connection_distance_m and the gap left between their two
    * boundaries along the connecting ray is at most max_connection_gap_m.
    */
-  bool isNearlyTouching(const TravNodeAttributes& attrs1,
-                        const TravNodeAttributes& attrs2) const;
+  bool isNearlyTouching(const spark_dsg::TravNodeAttributes& attrs1,
+                        const spark_dsg::TravNodeAttributes& attrs2) const;
 
   /**
    * @brief Distance from a node's centroid to its boundary in the given (local frame)
@@ -163,7 +163,7 @@ struct UpdateRegionGrowingTraversabilityFunctor : public UpdateFunctor {
    * a negative value if the boundary in that direction is not traversable, or if there
    * is no boundary information at all.
    */
-  double boundaryReach(const TravNodeAttributes& attrs,
+  double boundaryReach(const spark_dsg::TravNodeAttributes& attrs,
                        const Eigen::Vector3d& direction_L) const;
 
   /**

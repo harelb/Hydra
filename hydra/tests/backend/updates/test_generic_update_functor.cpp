@@ -36,6 +36,7 @@
 #include <glog/logging.h>
 #include <glog/stl_logging.h>
 #include <gtest/gtest.h>
+#include <hydra/backend/merge_tracker.h>
 #include <hydra/backend/updates/generic_update_functor.h>
 #include <kimera_pgmo/deformation_graph.h>
 #include <spark_dsg/node_attributes.h>

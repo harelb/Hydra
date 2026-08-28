@@ -36,9 +36,13 @@
 #include <config_utilities/factory.h>
 #include <gtest/gtest.h>
 #include <hydra/backend/dsg_updater.h>
-#include <hydra/backend/generic_update_functor.h>
+#include <spark_dsg/node_symbol.h>
+#include <hydra/backend/updates/generic_update_functor.h>
 
 #include "hydra_test/shared_dsg_fixture.h"
+
+// hydra/common/dsg_types.h (deleted upstream in #174) used to supply this
+using namespace spark_dsg;
 
 namespace hydra {
 namespace {
