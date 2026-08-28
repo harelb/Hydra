@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include <hydra_ros/utils/change_gate.h>
-#include <spark_dsg/dynamic_scene_graph.h>
+#include <spark_dsg/scene_graph.h>
 #include <spark_dsg/node_attributes.h>
 #include <spark_dsg/node_symbol.h>
 
@@ -10,8 +10,8 @@ namespace {
 
 constexpr uint64_t kSecond = 1'000'000'000ull;
 
-spark_dsg::DynamicSceneGraph::Ptr makeGraph(size_t num_nodes, double x_offset = 0.0) {
-  auto graph = std::make_shared<spark_dsg::DynamicSceneGraph>();
+spark_dsg::SceneGraph::Ptr makeGraph(size_t num_nodes, double x_offset = 0.0) {
+  auto graph = std::make_shared<spark_dsg::SceneGraph>();
   for (size_t i = 0; i < num_nodes; ++i) {
     auto attrs = std::make_unique<spark_dsg::NodeAttributes>();
     attrs->position << x_offset + static_cast<double>(i), 0.0, 0.0;

@@ -17,7 +17,7 @@ AsyncGraphPublisher::~AsyncGraphPublisher() {
   }
 }
 
-void AsyncGraphPublisher::submit(std::shared_ptr<spark_dsg::DynamicSceneGraph> snapshot,
+void AsyncGraphPublisher::submit(std::shared_ptr<spark_dsg::SceneGraph> snapshot,
                                  uint64_t timestamp_ns) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -32,7 +32,7 @@ void AsyncGraphPublisher::submit(std::shared_ptr<spark_dsg::DynamicSceneGraph> s
 
 void AsyncGraphPublisher::run() {
   while (true) {
-    std::shared_ptr<spark_dsg::DynamicSceneGraph> snapshot;
+    std::shared_ptr<spark_dsg::SceneGraph> snapshot;
     uint64_t ts = 0;
     {
       std::unique_lock<std::mutex> lock(mutex_);

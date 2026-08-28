@@ -1,5 +1,5 @@
 #pragma once
-#include <spark_dsg/dynamic_scene_graph.h>
+#include <spark_dsg/scene_graph.h>
 
 #include <Eigen/Geometry>
 #include <optional>
@@ -26,11 +26,11 @@ struct ChangeGate {
 
   explicit ChangeGate(const Config& config);
 
-  bool shouldPublish(const spark_dsg::DynamicSceneGraph& graph, uint64_t timestamp_ns);
-  void notePublished(const spark_dsg::DynamicSceneGraph& graph, uint64_t timestamp_ns);
+  bool shouldPublish(const spark_dsg::SceneGraph& graph, uint64_t timestamp_ns);
+  void notePublished(const spark_dsg::SceneGraph& graph, uint64_t timestamp_ns);
 
  private:
-  double maxDisplacement(const spark_dsg::DynamicSceneGraph& graph) const;
+  double maxDisplacement(const spark_dsg::SceneGraph& graph) const;
 
   std::unordered_map<spark_dsg::NodeId, Eigen::Vector3d> last_positions_;
   size_t last_num_nodes_ = 0;

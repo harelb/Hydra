@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include <hydra_ros/utils/async_graph_publisher.h>
-#include <spark_dsg/dynamic_scene_graph.h>
+#include <spark_dsg/scene_graph.h>
 
 #include <chrono>
 #include <condition_variable>
@@ -18,7 +18,7 @@ struct FakeSender {
   std::vector<uint64_t> stamps;
   bool block = false;
 
-  void send(const spark_dsg::DynamicSceneGraph&, uint64_t ts) {
+  void send(const spark_dsg::SceneGraph&, uint64_t ts) {
     std::unique_lock<std::mutex> lock(m);
     while (block) {
       cv.wait_for(lock, std::chrono::milliseconds(10));
@@ -33,8 +33,8 @@ struct FakeSender {
   }
 };
 
-std::shared_ptr<spark_dsg::DynamicSceneGraph> makeGraph() {
-  return std::make_shared<spark_dsg::DynamicSceneGraph>();
+std::shared_ptr<spark_dsg::SceneGraph> makeGraph() {
+  return std::make_shared<spark_dsg::SceneGraph>();
 }
 
 }  // namespace

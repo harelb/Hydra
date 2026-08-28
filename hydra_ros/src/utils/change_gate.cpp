@@ -22,7 +22,7 @@ void declare_config(ChangeGate::Config& config) {
 
 ChangeGate::ChangeGate(const Config& config) : config(config::checkValid(config)) {}
 
-bool ChangeGate::shouldPublish(const spark_dsg::DynamicSceneGraph& graph,
+bool ChangeGate::shouldPublish(const spark_dsg::SceneGraph& graph,
                                uint64_t timestamp_ns) {
   if (!last_publish_ns_) {
     return true;
@@ -47,7 +47,7 @@ bool ChangeGate::shouldPublish(const spark_dsg::DynamicSceneGraph& graph,
   return maxDisplacement(graph) >= config.displacement_threshold_m;
 }
 
-void ChangeGate::notePublished(const spark_dsg::DynamicSceneGraph& graph,
+void ChangeGate::notePublished(const spark_dsg::SceneGraph& graph,
                                uint64_t timestamp_ns) {
   last_publish_ns_ = timestamp_ns;
   last_num_nodes_ = graph.numNodes();
@@ -72,7 +72,7 @@ void ChangeGate::notePublished(const spark_dsg::DynamicSceneGraph& graph,
   }
 }
 
-double ChangeGate::maxDisplacement(const spark_dsg::DynamicSceneGraph& graph) const {
+double ChangeGate::maxDisplacement(const spark_dsg::SceneGraph& graph) const {
   double max_disp = 0.0;
   for (const auto& [node_id, last_pos] : last_positions_) {
     const auto node = graph.findNode(node_id);

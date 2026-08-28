@@ -92,7 +92,7 @@ RosBackendPublisher::RosBackendPublisher(ianvs::NodeHandle nh)
   dsg_sender_ = std::make_unique<DsgSender>(config.dsg_sender, nh);
   if (config.enable_async_publish) {
     async_publisher_ = std::make_unique<AsyncGraphPublisher>(
-        [this](const DynamicSceneGraph& snapshot, uint64_t snapshot_ts) {
+        [this](const SceneGraph& snapshot, uint64_t snapshot_ts) {
           dsg_sender_->sendGraph(snapshot, rclcpp::Time(snapshot_ts));
         });
   }
