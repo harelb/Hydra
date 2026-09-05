@@ -128,7 +128,11 @@ void SubKeyframeModule::spin() {
 
       std::string image_folder;
       if (writer_) {
-        writer_->write(packet->timestamp_ns, packet->color, packet->depth);
+        writer_->write(packet->timestamp_ns,
+                       packet->color,
+                       packet->depth,
+                       world_T_body,
+                       /*has_pose=*/true);
         image_folder = config_.image_output_path + "/subkf_" +
                        std::to_string(packet->timestamp_ns);
       }

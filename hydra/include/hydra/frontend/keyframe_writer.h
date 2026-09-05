@@ -22,9 +22,13 @@ class KeyframeWriter {
   explicit KeyframeWriter(const std::string& output_dir);
 
   void writeCalib(const CameraCalib& calib);
+  // ``world_T_body`` is serialized under the same key / flat row-major 4x4
+  // layout as agent_*_meta.json so both dumps load through one code path.
   void write(uint64_t timestamp_ns,
              const cv::Mat& color_rgb,
-             const cv::Mat& depth_m);
+             const cv::Mat& depth_m,
+             const Eigen::Isometry3d& world_T_body = Eigen::Isometry3d::Identity(),
+             bool has_pose = false);
 
  private:
   std::string output_dir_;
