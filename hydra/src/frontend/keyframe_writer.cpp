@@ -60,7 +60,7 @@ void KeyframeWriter::write(uint64_t timestamp_ns,
     } else {
       bgr = color_rgb.clone();
     }
-    cv::imwrite(base + "_rgb.jpg", bgr);
+    cv::imwrite(base + "_rgb.png", bgr);
   }
 
   if (!depth_m.empty()) {
@@ -76,7 +76,7 @@ void KeyframeWriter::write(uint64_t timestamp_ns,
   std::ofstream meta(base + "_meta.json");
   meta << "{\n";
   meta << "  \"timestamp_ns\": " << timestamp_ns << ",\n";
-  meta << "  \"rgb_file\": \"subkf_" << timestamp_ns << "_rgb.jpg\",\n";
+  meta << "  \"rgb_file\": \"subkf_" << timestamp_ns << "_rgb.png\",\n";
   meta << "  \"depth_file\": \"subkf_" << timestamp_ns << "_depth.png\",\n";
   meta << "  \"calib\": \"camera_calib.json\"\n";
   meta << "}\n";

@@ -14,7 +14,7 @@ struct CameraCalib {
   Eigen::Isometry3d body_T_sensor = Eigen::Isometry3d::Identity();
 };
 
-// ROS-free writer for full-rate sub-keyframes. Filenames: subkf_<ts>_{rgb.jpg,
+// ROS-free writer for full-rate sub-keyframes. Filenames: subkf_<ts>_{rgb.png,
 // depth.png,meta.json}. Depth stored as 16-bit millimeters. Mirrors the storage
 // convention of AgentImageExtractor (agent_image_extractor.cpp:161-233).
 class KeyframeWriter {

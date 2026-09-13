@@ -367,7 +367,10 @@ void AgentImageExtractor::updateGraph(spark_dsg::SceneGraph& graph,
 
     // Images are already in their on-disk form (see addFrame).
     if (!frame.color_bgr.empty()) {
-      cv::imwrite(base_path.string() + "_rgb.jpg", frame.color_bgr);
+      // PNG keeps the rendered RGB pixels bit-for-bit. JPEG made the archived
+      // keyframes smaller, but introduced avoidable compression artifacts in
+      // the visual-memory input used by downstream grounding.
+      cv::imwrite(base_path.string() + "_rgb.png", frame.color_bgr);
     }
 
     if (!frame.depth_mm.empty()) {
@@ -384,7 +387,7 @@ void AgentImageExtractor::updateGraph(spark_dsg::SceneGraph& graph,
       meta << "  \"frame_timestamp_ns\": " << frame.timestamp_ns << ",\n";
       meta << "  \"world_T_body\": " << isometryToJsonArray(frame.world_T_body)
            << ",\n";
-      meta << "  \"rgb_file\": \"" << name << "_rgb.jpg\",\n";
+      meta << "  \"rgb_file\": \"" << name << "_rgb.png\",\n";
       meta << "  \"depth_file\": \"" << name << "_depth.png\",\n";
       meta << "  \"calib\": \"camera_calib.json\"\n";
       meta << "}\n";

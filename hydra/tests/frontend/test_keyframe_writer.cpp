@@ -16,7 +16,7 @@ TEST(KeyframeWriter, WritesRgbDepthMeta) {
 
   writer.write(42, color, depth);
 
-  EXPECT_TRUE(std::filesystem::exists(dir / "subkf_42_rgb.jpg"));
+  EXPECT_TRUE(std::filesystem::exists(dir / "subkf_42_rgb.png"));
   EXPECT_TRUE(std::filesystem::exists(dir / "subkf_42_depth.png"));
   EXPECT_TRUE(std::filesystem::exists(dir / "subkf_42_meta.json"));
 
@@ -30,7 +30,7 @@ TEST(KeyframeWriter, WritesRgbDepthMeta) {
   std::string content((std::istreambuf_iterator<char>(meta)),
                       std::istreambuf_iterator<char>());
   EXPECT_NE(content.find("\"timestamp_ns\": 42"), std::string::npos);
-  EXPECT_NE(content.find("subkf_42_rgb.jpg"), std::string::npos);
+  EXPECT_NE(content.find("subkf_42_rgb.png"), std::string::npos);
   EXPECT_NE(content.find("subkf_42_depth.png"), std::string::npos);
   // The stale baked pose was removed; the authoritative pose now lives in the
   // DSG sub-keyframe node, not in the per-image metadata.
