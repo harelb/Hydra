@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <optional>
 
 namespace hydra {
 
@@ -24,7 +25,8 @@ class KeyframeWriter {
   void writeCalib(const CameraCalib& calib);
   void write(uint64_t timestamp_ns,
              const cv::Mat& color_rgb,
-             const cv::Mat& depth_m);
+             const cv::Mat& depth_m,
+             const std::optional<Eigen::Isometry3d>& world_T_body = std::nullopt);
 
  private:
   std::string output_dir_;

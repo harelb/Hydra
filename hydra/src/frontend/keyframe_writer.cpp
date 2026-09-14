@@ -48,7 +48,8 @@ void KeyframeWriter::writeCalib(const CameraCalib& calib) {
 
 void KeyframeWriter::write(uint64_t timestamp_ns,
                            const cv::Mat& color_rgb,
-                           const cv::Mat& depth_m) {
+                           const cv::Mat& depth_m,
+                           const std::optional<Eigen::Isometry3d>& world_T_body) {
   const std::string base =
       (std::filesystem::path(output_dir_) / ("subkf_" + std::to_string(timestamp_ns)))
           .string();
@@ -76,6 +77,9 @@ void KeyframeWriter::write(uint64_t timestamp_ns,
   std::ofstream meta(base + "_meta.json");
   meta << "{\n";
   meta << "  \"timestamp_ns\": " << timestamp_ns << ",\n";
+  if (world_T_body) {
+    meta << "  \"world_T_body\": " << isometryToJsonArray(*world_T_body) << ",\n";
+  }
   meta << "  \"rgb_file\": \"subkf_" << timestamp_ns << "_rgb.jpg\",\n";
   meta << "  \"depth_file\": \"subkf_" << timestamp_ns << "_depth.png\",\n";
   meta << "  \"calib\": \"camera_calib.json\"\n";
