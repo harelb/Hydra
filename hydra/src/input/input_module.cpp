@@ -76,6 +76,7 @@ InputModule::~InputModule() { stopImpl(); }
 
 void InputModule::start() {
   for (auto& receiver : receivers_) {
+    LOG(INFO) << "[Hydra Input] effective receiver queue limit=" << receiver->queue.max_size;
     receiver->init();
   }
   data_thread_.reset(new std::thread(&InputModule::dataSpin, this));

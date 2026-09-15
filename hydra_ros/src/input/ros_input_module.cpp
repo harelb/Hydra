@@ -62,7 +62,10 @@ void declare_config(RosInputModule::Config& config) {
 }
 
 InputModule::Config RosInputModule::Config::remapSensors() const {
-  InputModule::Config to_return;
+  // Sensor renaming must preserve the input module's queue bound. Constructing
+  // a fresh base config silently restores max_receiver_queue_size=0 (unbounded).
+  InputModule::Config to_return = *this;
+  to_return.inputs.clear();
   for (const auto& [name, input_pair] : inputs) {
     auto sensor_name = name;
     if (isNumber(sensor_name)) {

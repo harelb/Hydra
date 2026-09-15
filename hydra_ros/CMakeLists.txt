@@ -112,7 +112,7 @@ rclcpp_components_register_node(
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest)
   ament_add_gtest(test_${PROJECT_NAME} tests/main.cpp tests/test_async_graph_publisher.cpp tests/test_change_gate.cpp tests/test_ros_sensors.cpp
-                  tests/test_sub_keyframe_module.cpp)
+                  tests/test_sub_keyframe_module.cpp tests/test_ros_input_module.cpp)
   target_link_libraries(test_${PROJECT_NAME} ${PROJECT_NAME} gflags)
 endif()
 
