@@ -265,7 +265,12 @@ void ImageReceiverImpl<SemanticT>::callback(
   color_sub_.fillInput(*color, *packet);
   depth_sub_.fillInput(*depth, *packet);
   semantic_sub_.fillInput(*labels, *packet);
-  queue.push(packet);
+  // A bounded receiver must also bound time spent inside the ROS callback.
+  // Blocking here moves the backlog into middleware-owned image buffers.
+  // Drop this complete synchronized set when full; never split RGB-D/labels.
+  if (!queue.push(std::move(packet), /*blocking=*/false)) {
+    LOG_EVERY_N(WARNING, 100) << "[Image receiver] synchronized input dropped: queue full";
+  }
 }
 
 class RGBDImageReceiver : public RosDataReceiver {

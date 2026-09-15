@@ -260,7 +260,9 @@ void RGBDImageReceiver::callback(const sensor_msgs::msg::Image::ConstSharedPtr& 
   auto packet = std::make_shared<ImageInputPacket>(timestamp_ns, sensor_name_);
   color_sub_.fillInput(*color, *packet);
   depth_sub_.fillInput(*depth, *packet);
-  queue.push(packet);
+  if (!queue.push(std::move(packet), /*blocking=*/false)) {
+    LOG_EVERY_N(WARNING, 100) << "[RGB-D receiver] synchronized input dropped: queue full";
+  }
 }
 
 void declare_config(RGBDImageReceiver::Config& config) {
