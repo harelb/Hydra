@@ -36,7 +36,6 @@
 #include <config_utilities/virtual_config.h>
 
 #include "hydra/backend/association_strategies.h"
-#include "hydra/backend/backend_utilities.h"
 #include "hydra/backend/update_functions.h"
 #include "hydra/utils/active_window_tracker.h"
 #include "hydra/utils/logging.h"
@@ -56,9 +55,6 @@ struct UpdateObjectsFunctor : public UpdateFunctor {
     bool allow_connection_merging = true;
     //! Association strategy for finding matches to active nodes
     MergeProposer::Config merge_proposer = {AssociationConfig{SemanticAssociation{}}};
-    //! Root of the per-object image folders (see utils::ObjectImageFolders); empty
-    //! disables image folder management
-    std::filesystem::path image_root;
   } const config;
 
   explicit UpdateObjectsFunctor(const Config& config);
@@ -82,7 +78,6 @@ struct UpdateObjectsFunctor : public UpdateFunctor {
   mutable std::set<spark_dsg::NodeId> merged_nodes_;
   mutable ActiveWindowTracker active_tracker;
   const MergeProposer merge_proposer;
-  const utils::ObjectImageFolders image_folders;
 };
 
 void declare_config(UpdateObjectsFunctor::Config& config);
