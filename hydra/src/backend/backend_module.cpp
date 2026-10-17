@@ -469,10 +469,7 @@ bool BackendModule::updatePrivateDsg(size_t timestamp_ns, bool force_update) {
       return false;
     }
 
-    // archived nodes can still receive attribute updates (e.g., image folders)
-    GraphMergeConfig merge_config;
-    merge_config.update_archived_attributes = true;
-    unmerged_graph_->mergeGraph(*shared_dsg.graph, merge_config);
+    unmerged_graph_->mergeGraph(*shared_dsg.graph);
   }  // end joint critical section
 
   return true;
