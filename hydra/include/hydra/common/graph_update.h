@@ -95,6 +95,8 @@ struct LayerTracker {
 
 void declare_config(LayerTracker::Config& config);
 
+class ImageStore;
+
 struct GraphUpdater {
   struct Config {
     std::map<std::string, LayerTracker::Config> layer_updates;
@@ -105,8 +107,20 @@ struct GraphUpdater {
   explicit GraphUpdater(const Config& config);
   void update(const GraphUpdate& update, spark_dsg::SceneGraph& graph);
 
+  /**
+   * @brief Record which node each track becomes in an image store.
+   * @param store Image store to record track bindings in (nullptr disables)
+   * @param robot_id Robot that the tracks belong to
+   */
+  void setImageStore(std::shared_ptr<ImageStore> store, int robot_id);
+
  private:
   std::map<std::string, LayerTracker> trackers_;
+  std::shared_ptr<ImageStore> image_store_;
+  int robot_id_ = 0;
+
+  //! Record the node of a track (whenever the mapping is created or changes)
+  void bindTrack(size_t track_id, spark_dsg::NodeId node_id);
 
   void addNode(spark_dsg::SceneGraph& graph,
                LayerTracker& tracker,

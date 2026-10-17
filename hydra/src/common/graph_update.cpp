@@ -44,6 +44,7 @@
 #include <unordered_set>
 
 #include "hydra/common/attribute_merger.h"
+#include "hydra/utils/image_store.h"
 
 namespace YAML {
 
@@ -120,6 +121,18 @@ GraphUpdater::GraphUpdater(const Config& config) : config(config::checkValid(con
   }
 }
 
+void GraphUpdater::setImageStore(std::shared_ptr<ImageStore> store, int robot_id) {
+  image_store_ = std::move(store);
+  robot_id_ = robot_id;
+}
+
+void GraphUpdater::bindTrack(size_t track_id, NodeId node_id) {
+  if (image_store_) {
+    // idempotent, so re-binding after re-activation or double archival is harmless
+    image_store_->bindTrack(robot_id_, track_id, node_id);
+  }
+}
+
 void GraphUpdater::addNode(SceneGraph& graph,
                            LayerTracker& tracker,
                            LayerId target,
@@ -144,6 +157,7 @@ void GraphUpdater::addNode(SceneGraph& graph,
             << " for " << source;
     if (entry.track_id) {
       tracker.track_to_node[*entry.track_id] = *to_merge;
+      bindTrack(*entry.track_id, *to_merge);
     }
 
     tracker.attribute_cache[*entry.track_id] = entry.attributes->clone();
@@ -163,6 +177,7 @@ void GraphUpdater::addNode(SceneGraph& graph,
   graph.emplaceNode(target, new_id, std::move(attrs));
   if (entry.track_id) {
     tracker.track_to_node[*entry.track_id] = new_id;
+    bindTrack(*entry.track_id, new_id);
   }
 
   tracker.node_to_tracks[new_id] = {*entry.track_id};

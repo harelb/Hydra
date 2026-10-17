@@ -34,9 +34,12 @@
  * -------------------------------------------------------------------------- */
 #include <gtest/gtest.h>
 #include <hydra/common/graph_update.h>
+#include <hydra/utils/image_store.h>
 #include <spark_dsg/node_attributes.h>
 
+#include "hydra_test/image_store_query.h"
 #include "hydra_test/shared_dsg_fixture.h"
+#include "hydra_test/temp_directory.h"
 
 namespace hydra {
 
@@ -114,6 +117,35 @@ TEST(GraphUpdater, NoArchivalByDefault) {
   updater.update(round2, graph);
 
   EXPECT_TRUE(graph.getNode(spark_dsg::NodeSymbol('O', 1)).attributes().is_active);
+}
+
+// Tracks are bound to the node they became in the image store
+TEST(GraphUpdater, BindsTracksInImageStore) {
+  test::TempDirectory tmp;
+  auto dsg = test::makeSharedDsg();
+  auto& graph = *dsg->graph;
+  const auto layer_id = graph.getLayerKey("OBJECTS")->layer;
+
+  GraphUpdater updater(makeConfig(true));
+  auto store = ImageStore::open(tmp.path);
+  ASSERT_TRUE(store);
+  updater.setImageStore(store, 2);
+
+  for (size_t i = 0; i < 3; ++i) {
+    GraphUpdate round;
+    round[layer_id] = makeUpdate(layer_id, {7, 8});
+    updater.update(round, graph);
+  }
+
+  store->flush();
+  const auto rows = test::queryStore(
+      tmp.path, "SELECT robot_id, track_id, node_id FROM track_bindings ORDER BY 2");
+  ASSERT_EQ(rows.size(), 2u);
+  EXPECT_EQ(rows[0][0], "2");
+  EXPECT_EQ(rows[0][1], "7");
+  EXPECT_EQ(rows[0][2], std::to_string(static_cast<spark_dsg::NodeId>(spark_dsg::NodeSymbol('O', 0))));
+  EXPECT_EQ(rows[1][1], "8");
+  EXPECT_EQ(rows[1][2], std::to_string(static_cast<spark_dsg::NodeId>(spark_dsg::NodeSymbol('O', 1))));
 }
 
 }  // namespace hydra
