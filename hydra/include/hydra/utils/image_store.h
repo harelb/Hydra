@@ -226,6 +226,9 @@ class ImageStore {
   //! @brief Record which node a track belongs to (idempotent upsert)
   void bindTrack(int robot_id, uint64_t track_id, spark_dsg::NodeId node);
 
+  //! @brief Forget a track's node (the node was deleted before the track was extracted)
+  void unbindTrack(int robot_id, uint64_t track_id);
+
   /**
    * @brief Record node merges (child -> final parent, see SharedDsgInfo::merges).
    * @param merges Merges to add or update

@@ -405,6 +405,22 @@ TEST(ImageStore, TrackBindingsUpsert) {
             id(NodeSymbol('O', 2)));
 }
 
+// Unbinding removes the row; unknown tracks are ignored
+TEST(ImageStore, UnbindTrack) {
+  test::TempDirectory tmp;
+  auto store = ImageStore::open(tmp.path);
+  ASSERT_TRUE(store);
+  store->bindTrack(0, 5, NodeSymbol('O', 1));
+  store->bindTrack(0, 6, NodeSymbol('O', 2));
+  store->unbindTrack(0, 5);
+  store->unbindTrack(0, 9);
+  store->flush();
+  EXPECT_EQ(count(tmp.path, "track_bindings"), "1");
+  store->bindTrack(0, 5, NodeSymbol('O', 1));
+  store->flush();
+  EXPECT_EQ(count(tmp.path, "track_bindings"), "2");
+}
+
 // Ids continue after the largest id of each robot when a store is reopened
 TEST(ImageStore, ReopenResumesSequences) {
   test::TempDirectory tmp;

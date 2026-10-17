@@ -148,4 +148,35 @@ TEST(GraphUpdater, BindsTracksInImageStore) {
   EXPECT_EQ(rows[1][2], std::to_string(static_cast<spark_dsg::NodeId>(spark_dsg::NodeSymbol('O', 1))));
 }
 
+
+// A track whose node is deleted (extraction dropped it) loses its binding
+TEST(GraphUpdater, UnbindsDeletedTracksInImageStore) {
+  test::TempDirectory tmp;
+  auto dsg = test::makeSharedDsg();
+  auto& graph = *dsg->graph;
+  const auto layer_id = graph.getLayerKey("OBJECTS")->layer;
+
+  GraphUpdater updater(makeConfig(true));
+  auto store = ImageStore::open(tmp.path);
+  ASSERT_TRUE(store);
+  updater.setImageStore(store, 2);
+
+  GraphUpdate round1;
+  round1[layer_id] = makeUpdate(layer_id, {7, 8});
+  updater.update(round1, graph);
+
+  GraphUpdate round2;
+  auto deletion = std::make_shared<LayerUpdate>(layer_id);
+  deletion->updates.push_back(NodeUpdate{nullptr, 8, NodeUpdate::UpdateType::Delete});
+  round2[layer_id] = deletion;
+  updater.update(round2, graph);
+  EXPECT_FALSE(graph.hasNode(spark_dsg::NodeSymbol('O', 1)));
+
+  store->flush();
+  const auto rows =
+      test::queryStore(tmp.path, "SELECT track_id FROM track_bindings ORDER BY 1");
+  ASSERT_EQ(rows.size(), 1u);
+  EXPECT_EQ(rows[0][0], "7");
+}
+
 }  // namespace hydra

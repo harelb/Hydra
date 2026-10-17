@@ -199,6 +199,12 @@ void GraphUpdater::deleteNode(const NodeUpdate& entry,
     return;
   }
 
+  if (image_store_) {
+    // the track never became an object (extraction dropped it), so it has no images
+    // and must not keep pointing at a node that may be deleted below
+    image_store_->unbindTrack(robot_id_, *entry.track_id);
+  }
+
   tracker.attribute_cache.erase(*entry.track_id);
   tracker.node_to_tracks[map_iter->second].erase(*entry.track_id);
   if (tracker.node_to_tracks[map_iter->second].empty()) {

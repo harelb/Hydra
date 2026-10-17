@@ -234,6 +234,7 @@ struct ImageStore::Impl {
   std::unique_ptr<Statement> update_frame_kind;
   std::unique_ptr<Statement> insert_observation;
   std::unique_ptr<Statement> upsert_binding;
+  std::unique_ptr<Statement> delete_binding;
   std::unique_ptr<Statement> upsert_alias;
   std::unique_ptr<Statement> delete_alias;
   std::unique_ptr<Statement> find_sensor;
@@ -337,6 +338,7 @@ ImageStore::Impl::Impl(const ImageStore::Config& config) : config(config) {
     update_frame_kind.reset();
     insert_observation.reset();
     upsert_binding.reset();
+    delete_binding.reset();
     upsert_alias.reset();
     delete_alias.reset();
     find_sensor.reset();
@@ -372,6 +374,7 @@ ImageStore::Impl::~Impl() {
   update_frame_kind.reset();
   insert_observation.reset();
   upsert_binding.reset();
+  delete_binding.reset();
   upsert_alias.reset();
   delete_alias.reset();
   find_sensor.reset();
@@ -583,6 +586,8 @@ void ImageStore::Impl::prepareStatements() {
       db,
       "INSERT INTO track_bindings (robot_id, track_id, node_id) VALUES (?, ?, ?) ON "
       "CONFLICT (robot_id, track_id) DO UPDATE SET node_id = excluded.node_id");
+  delete_binding = std::make_unique<Statement>(
+      db, "DELETE FROM track_bindings WHERE robot_id = ? AND track_id = ?");
   upsert_alias = std::make_unique<Statement>(
       db,
       "INSERT INTO node_aliases (child_id, parent_id) VALUES (?, ?) ON CONFLICT "
@@ -1227,6 +1232,22 @@ void ImageStore::bindTrack(int robot_id, uint64_t track_id, NodeId node) {
                  impl->upsert_binding->bind(1, static_cast<int64_t>(robot_id))
                      .bind(2, static_cast<int64_t>(track_id))
                      .bind(3, static_cast<int64_t>(node))
+                     .run();
+               }});
+}
+
+void ImageStore::unbindTrack(int robot_id, uint64_t track_id) {
+  {
+    std::lock_guard<std::mutex> lock(impl_->state_mutex);
+    if (!impl_->bindings.erase({robot_id, track_id})) {
+      return;
+    }
+  }
+
+  auto impl = impl_.get();
+  impl_->push({nullptr, [=]() {
+                 impl->delete_binding->bind(1, static_cast<int64_t>(robot_id))
+                     .bind(2, static_cast<int64_t>(track_id))
                      .run();
                }});
 }
