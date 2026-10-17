@@ -36,6 +36,7 @@
 #include <config_utilities/virtual_config.h>
 #include <kimera_pgmo/kimera_pgmo_interface.h>
 
+#include <filesystem>
 #include <map>
 #include <memory>
 
@@ -43,6 +44,7 @@
 #include "hydra/common/output_sink.h"
 #include "hydra/common/shared_dsg_info.h"
 #include "hydra/utils/data_directory.h"
+#include "hydra/utils/image_store.h"
 #include "hydra/utils/logging.h"
 
 namespace hydra {
@@ -69,6 +71,8 @@ class DsgUpdater {
     config::OrderedMap<std::string, FunctorConfig> update_functors;
     //! Names of functors to use exhaustive merging for
     std::vector<std::string> exhaustive_functors;
+    //! Image store that mirrors the node merges (disabled if empty)
+    std::filesystem::path image_store_path;
   } const config;
 
   DsgUpdater(const Config& config,
@@ -88,10 +92,20 @@ class DsgUpdater {
   void handleMeshUpdate(uint64_t timestamp_ns,
                         const kimera_pgmo::MeshOffsetInfo& offsets);
 
+  /**
+   * @brief Update the target graph from the source graph and apply all update
+   * functors. Changes to the node merges are reported in the new_merges field of the
+   * target and mirrored into the image store (if configured).
+   */
   void callUpdateFunctions(uint64_t timestamp_ns, UpdateInfo::ConstPtr info);
 
  private:
+  void reportMerges();
+
   GroupedMergeTracker merge_tracker;
+  //! Merges as of the last report
+  std::map<spark_dsg::NodeId, spark_dsg::NodeId> reported_merges_;
+  ImageStore::Ptr image_store_;
   std::map<std::string, UpdateFunctor::Ptr> update_functors_;
 
   spark_dsg::SceneGraph::Ptr source_graph_;

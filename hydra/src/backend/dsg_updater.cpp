@@ -36,6 +36,7 @@
 
 #include <config_utilities/config.h>
 #include <config_utilities/printing.h>
+#include <config_utilities/types/path.h>
 #include <config_utilities/validation.h>
 #include <glog/logging.h>
 #include <glog/stl_logging.h>
@@ -92,12 +93,16 @@ void declare_config(DsgUpdater::Config& config) {
   field(config.reset_dsg_on_loop_closure, "reset_dsg_on_loop_closure");
   field(config.update_functors, "update_functors");
   field(config.exhaustive_functors, "exhaustive_functors");
+  field<Path>(config.image_store_path, "image_store_path");
 }
 
 DsgUpdater::DsgUpdater(const Config& config,
                        SceneGraph::Ptr source,
                        SharedDsgInfo::Ptr target)
-    : config(config::checkValid(config)), source_graph_(source), target_dsg_(target) {
+    : config(config::checkValid(config)),
+      image_store_(ImageStore::open(config.image_store_path)),
+      source_graph_(source),
+      target_dsg_(target) {
   for (const auto& [name, functor] : config.update_functors) {
     update_functors_.emplace(name, functor.create());
     merge_tracker.initializeTracker(name);
@@ -155,6 +160,7 @@ void DsgUpdater::handleMeshUpdate(uint64_t timestamp_ns,
 
 void DsgUpdater::callUpdateFunctions(size_t timestamp_ns, UpdateInfo::ConstPtr info) {
   ScopedTimer spin_timer("dsg_updater/update_layers", timestamp_ns);
+  target_dsg_->new_merges.clear();
 
   // TODO(nathan) chance that this causes weirdness when we have multiple nodes but no
   // accepted reconciliation merges
@@ -236,8 +242,41 @@ void DsgUpdater::callUpdateFunctions(size_t timestamp_ns, UpdateInfo::ConstPtr i
     source_graph_->getNewNodes(true);
   }
 
-  // TODO(image_store): report the merges applied this round (diff target_dsg_->merges
-  // against the last reported state) and forward them to ImageStore::recordMerges
+  reportMerges();
+}
+
+void DsgUpdater::reportMerges() {
+  // merges are cumulative (child -> final parent): merging a parent re-parents its
+  // children and resetting the backend graph clears them, so both additions and
+  // removals are reported relative to the last report
+  const auto& merges = target_dsg_->merges;
+  auto& updates = target_dsg_->new_merges;
+  std::map<NodeId, NodeId> changed;
+  for (const auto& [child, parent] : merges) {
+    const auto iter = reported_merges_.find(child);
+    if (iter == reported_merges_.end() || iter->second != parent) {
+      changed.emplace(child, parent);
+      updates.push_back({child, parent});
+    }
+  }
+
+  std::vector<NodeId> removed;
+  for (const auto& [child, parent] : reported_merges_) {
+    if (!merges.count(child)) {
+      removed.push_back(child);
+      updates.push_back({child, std::nullopt});
+    }
+  }
+
+  reported_merges_ = merges;
+  if (!updates.empty()) {
+    MLOG(1) << "merge updates: " << changed.size() << " changed, " << removed.size()
+            << " removed";
+  }
+
+  if (image_store_ && !updates.empty()) {
+    image_store_->recordMerges(changed, removed);
+  }
 }
 
 }  // namespace hydra
