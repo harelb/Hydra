@@ -47,6 +47,7 @@
 #include <chrono>
 #include <filesystem>
 
+#include "hydra_test/image_store_query.h"
 #include "hydra_test/shared_dsg_fixture.h"
 #include "hydra_test/temp_directory.h"
 
@@ -88,7 +89,7 @@ InputData::Ptr makeData(const Sensor::ConstPtr& sensor, uint64_t stamp_ns) {
 
 AgentImageExtractor::Config makeConfig(const fs::path& output) {
   AgentImageExtractor::Config config;
-  config.image_output_path = output;
+  config.image_store_path = output;
   return config;
 }
 
@@ -131,8 +132,14 @@ struct ExtractorHarness {
     extractor.callPostUpdate(*dsg, output);
   }
 
-  const std::string& folder(NodeId node) const {
-    return dsg->graph->getNode(node).attributes<AgentNodeAttributes>().image_folder;
+  //! RGB path of the keyframe anchored to a node (empty if there is none)
+  std::string folder(NodeId node) const {
+    const auto store = ImageStore::open(extractor.config.image_store_path);
+    store->flush();
+    return test::queryValue(extractor.config.image_store_path,
+                            "SELECT rgb_path FROM frames WHERE kind = 0 AND "
+                            "anchor_node_id = " +
+                                std::to_string(static_cast<int64_t>(node)));
   }
 
   AgentImageExtractor extractor;
@@ -145,26 +152,26 @@ struct ExtractorHarness {
 
 TEST(AgentImageExtractor, ConfigRequiresOutputPath) {
   EXPECT_FALSE(config::isValid(AgentImageExtractor::Config()));
-  EXPECT_TRUE(config::isValid(makeConfig("/tmp/run/agents")));
+  EXPECT_TRUE(config::isValid(makeConfig("/tmp/run/image_store")));
 }
 
 // The extractor is an optional graph builder functor
 TEST(AgentImageExtractor, CreatedFromYaml) {
   test::TempDirectory tmp;
-  const auto output = tmp.path / "agents";
+  const auto output = tmp.path / "image_store";
   const auto node =
-      YAML::Load("{type: AgentImageExtractor, image_output_path: " + output.string() +
+      YAML::Load("{type: AgentImageExtractor, image_store_path: " + output.string() +
                  ", sensor_name: left, gate: {min_translation_m: 0.5}}");
   const auto config =
       config::fromYaml<config::VirtualConfig<GraphBuilderFunctor>>(node);
   const auto functor = config.create();
   const auto extractor = dynamic_cast<const AgentImageExtractor*>(functor.get());
   ASSERT_TRUE(extractor);
-  EXPECT_EQ(extractor->config.image_output_path, output);
+  EXPECT_EQ(extractor->config.image_store_path, output);
   EXPECT_EQ(extractor->config.sensor_name, "left");
   EXPECT_DOUBLE_EQ(extractor->config.gate.min_translation_m, 0.5);
   EXPECT_DOUBLE_EQ(extractor->config.gate.min_rotation_deg, 30.0);
-  EXPECT_TRUE(fs::exists(output));
+  EXPECT_TRUE(fs::exists(output / ImageStore::kDatabaseName));
 }
 
 // Buffered frames must not share pixel buffers with the input, which shares them with
@@ -190,7 +197,7 @@ TEST(AgentImageExtractor, BufferSharesNothingWithInput) {
 // translation threshold
 TEST(AgentImageExtractor, WritesPairedKeyframes) {
   test::TempDirectory tmp;
-  const auto output = tmp.path / "agents";
+  const auto output = tmp.path / "image_store";
   auto config = makeConfig(output);
   config.gate.min_translation_m = 1.0;
   ExtractorHarness harness(config);
@@ -203,24 +210,31 @@ TEST(AgentImageExtractor, WritesPairedKeyframes) {
   const auto a2 = harness.addAgent(2, 3000, 1.5);
   harness.update();
 
-  // image folders are relative to the parent of the output directory
-  EXPECT_EQ(harness.folder(a0), "agents/agent_1000");
+  // keyframes are anchored to their agent node
+  EXPECT_EQ(harness.folder(a0), "frames/r0/1000_rgb.jpg");
   EXPECT_TRUE(harness.folder(a1).empty());
-  EXPECT_EQ(harness.folder(a2), "agents/agent_3000");
-  EXPECT_TRUE(fs::exists(output / "camera_calib.json"));
-  for (const std::string name : {"agent_1000", "agent_3000"}) {
-    EXPECT_TRUE(fs::exists(output / (name + "_rgb.jpg")));
-    EXPECT_TRUE(fs::exists(output / (name + "_depth.png")));
-    EXPECT_TRUE(fs::exists(output / (name + "_meta.json")));
+  EXPECT_EQ(harness.folder(a2), "frames/r0/3000_rgb.jpg");
+  for (const std::string name : {"1000", "3000"}) {
+    EXPECT_TRUE(fs::exists(output / "frames/r0" / (name + "_rgb.jpg")));
+    EXPECT_TRUE(fs::exists(output / "frames/r0" / (name + "_depth.png")));
   }
 
-  EXPECT_FALSE(fs::exists(output / "agent_2000_meta.json"));
+  EXPECT_FALSE(fs::exists(output / "frames/r0/2000_rgb.jpg"));
+  EXPECT_EQ(test::queryValue(output, "SELECT COUNT(*) FROM frames"), "2");
+  EXPECT_EQ(test::queryValue(output, "SELECT name || ':' || width FROM sensors"),
+            "camera:8");
+
+  // the frame was taken at the node pose, so the offset to the anchor is identity
+  EXPECT_EQ(test::queryValue(output,
+                             "SELECT length(anchor_T_body) FROM frames WHERE "
+                             "timestamp_ns = 3000"),
+            std::to_string(16 * sizeof(double)));
 }
 
 // Frames from other sensors are ignored when a sensor name is configured
 TEST(AgentImageExtractor, FiltersBySensorName) {
   test::TempDirectory tmp;
-  auto config = makeConfig(tmp.path / "agents");
+  auto config = makeConfig(tmp.path / "image_store");
   config.sensor_name = "camera";
   ExtractorHarness harness(config);
   const auto other = std::make_shared<Camera>(makeCameraConfig(), "other");
@@ -231,13 +245,13 @@ TEST(AgentImageExtractor, FiltersBySensorName) {
   const auto a1 = harness.addAgent(1, 2000000000, 5.0);
   harness.update();
   EXPECT_TRUE(harness.folder(a0).empty());
-  EXPECT_EQ(harness.folder(a1), "agents/agent_2000000000");
+  EXPECT_EQ(harness.folder(a1), "frames/r0/2000000000_rgb.jpg");
 }
 
 // A node waits a bounded number of updates for its frame
 TEST(AgentImageExtractor, DefersMissingFramesBounded) {
   test::TempDirectory tmp;
-  auto config = makeConfig(tmp.path / "agents");
+  auto config = makeConfig(tmp.path / "image_store");
   config.gate.min_translation_m = 0.0;
   config.max_deferred_updates = 2;
   ExtractorHarness harness(config);

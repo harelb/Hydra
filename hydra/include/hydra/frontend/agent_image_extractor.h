@@ -39,6 +39,7 @@
 #include <Eigen/Geometry>
 #include <deque>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <opencv2/core/mat.hpp>
 #include <optional>
@@ -47,29 +48,28 @@
 
 #include "hydra/frontend/graph_builder_functor.h"
 #include "hydra/frontend/keyframe_gate.h"
-#include "hydra/frontend/keyframe_writer.h"
+#include "hydra/utils/image_store.h"
 #include "hydra/utils/logging.h"
 
 namespace hydra {
 
 /**
- * @brief Saves color and depth images for agent (pose graph) nodes to disk.
+ * @brief Saves color and depth images for agent (pose graph) nodes to the image store.
  *
  * Sensor frames of every input are buffered and paired with the agent node created
  * from the same input (agent nodes are stamped with the input timestamp). A keyframe
- * is written for a node when the agent moved or rotated far enough since the last
- * keyframe and the node's image_folder is set to its file prefix (see KeyframeWriter),
- * e.g., `agents/agent_<timestamp_ns>` for the output path `<run>/agents`. Depth is
- * stored as 16-bit millimeters and the metadata includes world_T_body of the frame.
+ * frame is written for a node when the agent moved or rotated far enough since the last
+ * keyframe. The frame is anchored to the node (anchor_T_body is the offset between the
+ * node and the paired frame, i.e., close to identity), so its pose follows the node
+ * when the backend optimizes. No node attributes are modified.
  */
 class AgentImageExtractor : public GraphBuilderFunctor {
  public:
   struct Config : public VerbosityConfig {
     Config();
 
-    //! Directory to save keyframe images to (required). Image folders are relative to
-    //! its parent directory
-    std::filesystem::path image_output_path;
+    //! Directory of the image store to save keyframes to (required, see ImageStore)
+    std::filesystem::path image_store_path;
     //! Name of the sensor to save images from (empty accepts any sensor)
     std::string sensor_name;
     //! Motion required between keyframes
@@ -99,6 +99,7 @@ class AgentImageExtractor : public GraphBuilderFunctor {
   //! One buffered sensor frame (owning its pixel buffers)
   struct BufferedFrame {
     uint64_t timestamp_ns = 0;
+    std::string sensor;
     cv::Mat color;
     cv::Mat depth;
     Eigen::Isometry3d world_T_body = Eigen::Isometry3d::Identity();
@@ -108,6 +109,7 @@ class AgentImageExtractor : public GraphBuilderFunctor {
   struct Keyframe {
     spark_dsg::NodeId node;
     uint64_t node_ns;
+    Eigen::Isometry3d world_T_node;
     BufferedFrame frame;
   };
 
@@ -121,7 +123,7 @@ class AgentImageExtractor : public GraphBuilderFunctor {
                                         const std::vector<BufferedFrame>& frames);
 
   KeyframeGate gate_;
-  KeyframeWriter writer_;
+  ImageStore::Ptr store_;
 
   //! New agent nodes that were not paired with a frame yet (oldest first)
   std::deque<spark_dsg::NodeId> pending_nodes_;
@@ -130,10 +132,10 @@ class AgentImageExtractor : public GraphBuilderFunctor {
   //! Timestamp of the newest agent node already decided on
   uint64_t last_decided_ns_ = 0;
 
-  //! Recent sensor frames (oldest first) and the calibration of their camera
+  //! Recent sensor frames (oldest first) and the calibration of their cameras
   std::mutex frame_mutex_;
   std::deque<BufferedFrame> frames_;
-  std::optional<CameraCalib> calib_;
+  std::map<std::string, CameraCalib> calibs_;
 };
 
 void declare_config(AgentImageExtractor::Config& config);

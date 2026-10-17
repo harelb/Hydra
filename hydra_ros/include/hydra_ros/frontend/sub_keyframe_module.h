@@ -36,7 +36,7 @@
 
 #include <hydra/common/module.h>
 #include <hydra/frontend/keyframe_gate.h>
-#include <hydra/frontend/keyframe_writer.h>
+#include <hydra/utils/image_store.h>
 #include <hydra/utils/logging.h>
 
 #include <atomic>
@@ -55,27 +55,26 @@ struct SubKeyframeInput;
  * @brief Captures sub-keyframes from the full-rate color and depth images.
  *
  * Drains PipelineQueues::subkeyframe_queue (filled by the image receivers, so it is
- * independent of the rate of the semantic input), looks up the body pose, writes
- * images that pass the keyframe gate to disk (files named
- * `subkf_<timestamp_ns>_{rgb.jpg,depth.png,meta.json}`, see KeyframeWriter) and
- * requests a sub-keyframe node from the frontend via
- * PipelineQueues::subkeyframe_node_queue.
+ * independent of the rate of the semantic input), looks up the body pose and writes
+ * images that pass the keyframe gate (the frame rate knob) to the image store as
+ * sub-keyframe frames with their odometric pose. The frontend later anchors them to a
+ * nearby agent node (see GraphBuilder::anchorPendingFrames).
  */
 class SubKeyframeModule : public Module {
  public:
   struct Config : public VerbosityConfig {
     Config();
 
-    //! Directory to save sub-keyframe images to (required). Image folders are relative
-    //! to its parent directory
-    std::filesystem::path image_output_path;
+    //! Directory of the image store to save sub-keyframes to (required, see
+    //! ImageStore)
+    std::filesystem::path image_store_path;
     //! Name of the sensor to capture sub-keyframes from (empty accepts any sensor)
     std::string sensor_name;
     //! Motion required between sub-keyframes
     KeyframeGate::Config gate;
     //! Body pose lookup
     TFLookup::Config tf_lookup;
-    //! Maximum number of pending images and node requests (excess is dropped)
+    //! Maximum number of pending images (excess is dropped)
     size_t queue_max_size = 30;
   } const config;
 
@@ -99,7 +98,7 @@ class SubKeyframeModule : public Module {
   void stopImpl();
 
   KeyframeGate gate_;
-  KeyframeWriter writer_;
+  ImageStore::Ptr store_;
   std::unique_ptr<TFLookup> lookup_;
   std::atomic<bool> should_shutdown_{false};
   std::unique_ptr<std::thread> spin_thread_;

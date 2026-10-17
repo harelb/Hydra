@@ -42,7 +42,6 @@
 #include <string>
 
 #include "hydra/common/message_queue.h"
-#include "hydra/common/sub_keyframes.h"
 #include "hydra/loop_closure/registration_solution.h"
 
 namespace hydra {
@@ -77,18 +76,15 @@ class PipelineQueues {
   MessageQueue<pose_graph_tools::PoseGraph> external_loop_closure_queue;
   //! Full-rate images for sub-keyframes (see acceptsSubKeyframes)
   MessageQueue<SubKeyframeInput> subkeyframe_queue;
-  //! Sub-keyframe node requests drained by the frontend (which owns all mutation of
-  //! the frontend graph)
-  MessageQueue<SubKeyframeRequest> subkeyframe_node_queue;
 
   /**
    * @brief Start accepting sub-keyframe images (see acceptsSubKeyframes)
-   * @param max_queue_size Maximum size of the sub-keyframe queues
+   * @param max_queue_size Maximum size of the sub-keyframe queue
    * @param sensor_name Sensor to accept images from (empty accepts any sensor)
    */
   void enableSubKeyframes(size_t max_queue_size, const std::string& sensor_name);
 
-  //! @brief Stop accepting sub-keyframe images and clear the sub-keyframe queues
+  //! @brief Stop accepting sub-keyframe images and clear the sub-keyframe queue
   void disableSubKeyframes();
 
   //! @brief Whether images of a sensor should be pushed to subkeyframe_queue

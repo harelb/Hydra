@@ -92,14 +92,14 @@ struct TempDirectory {
 
 TEST(SubKeyframeModule, ConfigParsesFromYaml) {
   const std::string yaml = R"yaml(
-image_output_path: /tmp/run/subkeyframes
+image_store_path: /tmp/run/image_store
 sensor_name: left_camera
 gate: {min_translation_m: 0.25, min_rotation_deg: 15.0}
 tf_lookup: {max_tries: 5}
 queue_max_size: 30
 )yaml";
   const auto config = config::fromYaml<SubKeyframeModule::Config>(YAML::Load(yaml));
-  EXPECT_EQ(config.image_output_path, "/tmp/run/subkeyframes");
+  EXPECT_EQ(config.image_store_path, "/tmp/run/image_store");
   EXPECT_EQ(config.sensor_name, "left_camera");
   EXPECT_DOUBLE_EQ(config.gate.min_translation_m, 0.25);
   EXPECT_DOUBLE_EQ(config.gate.min_rotation_deg, 15.0);
@@ -108,13 +108,13 @@ queue_max_size: 30
   EXPECT_FALSE(config::isValid(SubKeyframeModule::Config()));
 }
 
-// The module enables the hand-off queues, writes gated images and requests nodes
-TEST(SubKeyframeModule, WritesImagesAndRequestsNodes) {
+// The module enables the hand-off queue and writes gated images as unanchored frames
+TEST(SubKeyframeModule, WritesUnanchoredFrames) {
   TempDirectory tmp;
-  const auto output = tmp.path / "subkeyframes";
+  const auto output = tmp.path / "image_store";
 
   SubKeyframeModule::Config config;
-  config.image_output_path = output;
+  config.image_store_path = output;
   config.sensor_name = "camera";
   config.gate.min_translation_m = 0.5;
   auto& queues = PipelineQueues::instance();
@@ -132,22 +132,22 @@ TEST(SubKeyframeModule, WritesImagesAndRequestsNodes) {
     world_T_body.translation().x() = 1.0;
     EXPECT_TRUE(module.processInput(makeInput(sensor, 30), world_T_body));
 
-    EXPECT_TRUE(fs::exists(output / "camera_calib.json"));
-    EXPECT_TRUE(fs::exists(output / "subkf_10_rgb.jpg"));
-    EXPECT_TRUE(fs::exists(output / "subkf_10_depth.png"));
-    EXPECT_TRUE(fs::exists(output / "subkf_10_meta.json"));
-    EXPECT_FALSE(fs::exists(output / "subkf_20_meta.json"));
-    EXPECT_TRUE(fs::exists(output / "subkf_30_meta.json"));
+    // the module shares the store instance of its directory
+    const auto store = ImageStore::open(output);
+    ASSERT_TRUE(store);
+    store->flush();
+    EXPECT_TRUE(fs::exists(output / ImageStore::kDatabaseName));
+    EXPECT_TRUE(fs::exists(output / "frames/r0/10_rgb.jpg"));
+    EXPECT_TRUE(fs::exists(output / "frames/r0/10_depth.png"));
+    EXPECT_FALSE(fs::exists(output / "frames/r0/20_rgb.jpg"));
+    EXPECT_TRUE(fs::exists(output / "frames/r0/30_rgb.jpg"));
 
-    auto& node_queue = queues.subkeyframe_node_queue;
-    ASSERT_EQ(node_queue.size(), 2u);
-    const auto first = node_queue.pop();
-    EXPECT_EQ(first.timestamp_ns, 10u);
-    // image folders are relative to the parent of the output directory
-    EXPECT_EQ(first.image_folder, "subkeyframes/subkf_10");
-    const auto second = node_queue.pop();
-    EXPECT_EQ(second.timestamp_ns, 30u);
-    EXPECT_NEAR(second.world_T_subframe.translation().x(), 1.0, 1.0e-9);
+    // frames wait for the frontend to anchor them
+    const auto pending = store->unanchoredFrames(0, 100);
+    ASSERT_EQ(pending.size(), 2u);
+    EXPECT_EQ(pending[0].timestamp_ns, 10u);
+    EXPECT_EQ(pending[1].timestamp_ns, 30u);
+    EXPECT_NEAR(pending[1].world_T_body.translation().x(), 1.0, 1.0e-9);
   }
 
   EXPECT_FALSE(queues.acceptsSubKeyframes("camera"));
@@ -157,7 +157,7 @@ TEST(SubKeyframeModule, WritesImagesAndRequestsNodes) {
 TEST(SubKeyframeModule, ParsesOnlyGatedImages) {
   TempDirectory tmp;
   SubKeyframeModule::Config config;
-  config.image_output_path = tmp.path / "subkeyframes";
+  config.image_store_path = tmp.path / "image_store";
   config.gate.min_translation_m = 0.5;
   SubKeyframeModule module(config);
 
@@ -174,7 +174,6 @@ TEST(SubKeyframeModule, ParsesOnlyGatedImages) {
   EXPECT_TRUE(module.processInput(input, world_T_body));
   EXPECT_FALSE(module.processInput(input, world_T_body));
   EXPECT_EQ(num_parsed, 1u);
-  PipelineQueues::instance().subkeyframe_node_queue.clear();
 }
 
 }  // namespace hydra

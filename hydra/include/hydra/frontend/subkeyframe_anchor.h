@@ -48,7 +48,7 @@
 
 namespace hydra {
 
-//! Agent node that a sub-keyframe can be attached to
+//! Agent node that a frame (e.g., a sub-keyframe) can be anchored to
 struct AnchorCandidate {
   spark_dsg::NodeId id;
   uint64_t timestamp_ns;
@@ -56,10 +56,10 @@ struct AnchorCandidate {
 };
 
 /**
- * @brief Recent agent nodes that sub-keyframes can be anchored to.
+ * @brief Recent agent nodes that frames can be anchored to.
  *
- * Sub-keyframe requests are always close to the current time, so only the agent nodes
- * created within a time window of the newest one are kept, which bounds the cost of
+ * Frames waiting for an anchor are close to the current time, so only the agent nodes
+ * created within a time window of the newest one are kept, which bounds the memory of
  * anchoring independently of the trajectory length.
  */
 class AnchorWindow {
@@ -80,6 +80,16 @@ class AnchorWindow {
   //! @brief Anchors in the window with the current poses of their nodes in the graph
   std::vector<AnchorCandidate> candidates(const spark_dsg::SceneGraph& graph) const;
 
+  /**
+   * @brief The anchors just before and at or after a timestamp (at most two) with the
+   * current poses of their nodes in the graph (see selectNearestAnchor)
+   */
+  std::vector<AnchorCandidate> neighbors(const spark_dsg::SceneGraph& graph,
+                                         uint64_t timestamp_ns) const;
+
+  //! @brief Timestamp of the newest anchor (if any)
+  std::optional<uint64_t> newest() const;
+
   //! @brief Number of anchors in the window
   size_t size() const { return anchors_.size(); }
 
@@ -90,7 +100,7 @@ class AnchorWindow {
 };
 
 /**
- * @brief Select the anchor for a sub-keyframe.
+ * @brief Select the anchor for a frame.
  *
  * Selects the temporally-nearest anchor (which stays within the same pass through an
  * area, even when revisiting it) and accepts it only if it is within max_dist_m of
@@ -103,21 +113,8 @@ std::optional<size_t> selectNearestAnchor(const std::vector<AnchorCandidate>& an
                                           const Eigen::Vector3d& subframe_position,
                                           double max_dist_m);
 
-//! @brief Compute anchor_T_subframe
+//! @brief Compute anchor_T_subframe (the pose of a frame relative to its anchor)
 Eigen::Isometry3d computeRelativeTransform(const Eigen::Isometry3d& world_T_anchor,
                                            const Eigen::Isometry3d& world_T_subframe);
-
-/**
- * @brief Build the attributes of a sub-keyframe node.
- *
- * The transform relative to the anchor is the source of truth; the world position is
- * seeded from world_T_subframe and refreshed from the anchor by the backend.
- */
-std::unique_ptr<spark_dsg::SubKeyframeNodeAttributes> buildSubKeyframeAttrs(
-    spark_dsg::NodeId anchor_id,
-    const Eigen::Isometry3d& world_T_anchor,
-    const Eigen::Isometry3d& world_T_subframe,
-    uint64_t timestamp_ns,
-    const std::string& image_folder);
 
 }  // namespace hydra

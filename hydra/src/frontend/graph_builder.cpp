@@ -36,10 +36,9 @@
 
 #include <config_utilities/config.h>
 #include <config_utilities/printing.h>
-#include <config_utilities/types/conversions.h>
+#include <config_utilities/types/path.h>
 #include <config_utilities/validation.h>
 #include <glog/logging.h>
-#include <kimera_pgmo/utils/common_functions.h>
 #include <kimera_pgmo/utils/mesh_io.h>
 #include <spark_dsg/node_attributes.h>
 #include <spark_dsg/node_symbol.h>
@@ -103,15 +102,11 @@ void declare_config(GraphBuilder::Config& config) {
   field(config.frontier_places, "frontier_places");
   config.agent_extractor.setOptional();
   field(config.agent_extractor, "agent_extractor");
-  field(config.subkeyframe_anchor_max_dist_m, "subkeyframe_anchor_max_dist_m", "m");
-  check(config.subkeyframe_anchor_max_dist_m, GE, 0.0, "subkeyframe_anchor_max_dist_m");
-  field(config.subkeyframe_anchor_window_s, "subkeyframe_anchor_window_s", "s");
-  check(config.subkeyframe_anchor_window_s, GT, 0.0, "subkeyframe_anchor_window_s");
-  field<CharConversion>(config.subkeyframe_partition, "subkeyframe_partition");
-  checkCondition(
-      !kimera_pgmo::robot_prefix_to_id.count(config.subkeyframe_partition) &&
-          !kimera_pgmo::vertex_prefix_to_id.count(config.subkeyframe_partition),
-      "subkeyframe_partition must differ from robot and vertex prefixes");
+  field<Path>(config.image_store_path, "image_store_path");
+  field(config.frame_anchor_max_dist_m, "frame_anchor_max_dist_m", "m");
+  check(config.frame_anchor_max_dist_m, GE, 0.0, "frame_anchor_max_dist_m");
+  field(config.frame_anchor_window_s, "frame_anchor_window_s", "s");
+  check(config.frame_anchor_window_s, GT, 0.0, "frame_anchor_window_s");
 
   field(config.sinks, "sinks");
 }
@@ -137,9 +132,10 @@ GraphBuilder::GraphBuilder(const Config& config,
       map_window_(GlobalInfo::instance().createVolumetricWindow()),
       surface_places_(config.surface_places.create(
           GlobalInfo::instance().labelspace().surface_places_labels)),
-      subkeyframe_anchors_(static_cast<uint64_t>(
+      image_store_(ImageStore::open(config.image_store_path)),
+      frame_anchors_(static_cast<uint64_t>(
           std::chrono::duration_cast<std::chrono::nanoseconds>(
-              std::chrono::duration<double>(config.subkeyframe_anchor_window_s))
+              std::chrono::duration<double>(config.frame_anchor_window_s))
               .count())),
       sinks_(Sink::instantiate(config.sinks)) {
   const auto& global_info = GlobalInfo::instance();
@@ -162,6 +158,7 @@ GraphBuilder::GraphBuilder(const Config& config,
   functors_.emplace("freespace_places", config.freespace_places.create());
   functors_.emplace("traversability_places", config.traversability_places.create());
   functors_.emplace("frontier_places", config.frontier_places.create());
+  graph_updater_.setImageStore(image_store_, global_info.getRobotPrefix().id);
   functors_.emplace("agent_extractor", config.agent_extractor.create());
   for (const auto& [_, functor] : functors_) {
     callbacks_.push_back([&](auto msg) {
@@ -386,7 +383,7 @@ void GraphBuilder::updateImpl(const ActiveWindowOutput::Ptr& msg) {
   }
 
   // runs after the pose graph tracker added this update's agent nodes
-  updateSubKeyframes();
+  anchorPendingFrames();
 }
 
 void GraphBuilder::updateMesh(const ActiveWindowOutput& input) {
@@ -440,61 +437,50 @@ void GraphBuilder::updatePlaces2d(const ActiveWindowOutput& input) {
   surface_places_->updateGraph(input, mesh_offsets_, *dsg_->graph);
 }
 
-void GraphBuilder::updateSubKeyframes() {
+void GraphBuilder::anchorPendingFrames() {
+  if (!image_store_ || !curr_output_) {
+    return;
+  }
+
   const auto& prefix = GlobalInfo::instance().getRobotPrefix();
   std::vector<NodeId> new_anchors;
-  if (curr_output_) {
-    for (const auto node_id : curr_output_->new_agent_nodes) {
-      if (NodeSymbol(node_id).category() == prefix.key) {
-        new_anchors.push_back(node_id);
-      }
+  for (const auto node_id : curr_output_->new_agent_nodes) {
+    if (NodeSymbol(node_id).category() == prefix.key) {
+      new_anchors.push_back(node_id);
     }
   }
 
-  auto& queue = PipelineQueues::instance().subkeyframe_node_queue;
-  if (new_anchors.empty() && queue.empty()) {
-    return;
+  if (new_anchors.empty()) {
+    return;  // frames newer than the newest anchor wait for the next agent node
   }
 
   std::lock_guard<std::mutex> lock(dsg_->mutex);
-  auto& graph = *dsg_->graph;
-  // requests are close to the current time, so only recent agent nodes are anchors
-  subkeyframe_anchors_.update(graph, new_anchors);
-  if (queue.empty()) {
+  const auto& graph = *dsg_->graph;
+  frame_anchors_.update(graph, new_anchors);
+  const auto newest = frame_anchors_.newest();
+  if (!newest) {
     return;
   }
 
-  const auto layer_key = graph.getLayerKey(DsgLayers::AGENTS);
-  if (!layer_key) {
-    return;
-  }
-
-  const auto anchors = subkeyframe_anchors_.candidates(graph);
-  while (!queue.empty()) {
-    const auto request = queue.pop();
+  // only frames with an anchor on both sides in time are decided
+  for (const auto& frame : image_store_->unanchoredFrames(prefix.id, *newest)) {
+    const auto anchors = frame_anchors_.neighbors(graph, frame.timestamp_ns);
     const auto anchor_idx = selectNearestAnchor(anchors,
-                                                request.timestamp_ns,
-                                                request.world_T_subframe.translation(),
-                                                config.subkeyframe_anchor_max_dist_m);
+                                                frame.timestamp_ns,
+                                                frame.world_T_body.translation(),
+                                                config.frame_anchor_max_dist_m);
     if (!anchor_idx) {
-      MLOG(2) << "Dropping sub-keyframe @ " << request.timestamp_ns
-              << " [ns]: no anchor within " << config.subkeyframe_anchor_max_dist_m
-              << " [m]";
+      MLOG(2) << "No anchor within " << config.frame_anchor_max_dist_m
+              << " [m] for frame @ " << frame.timestamp_ns << " [ns]";
+      image_store_->abandonAnchor(frame.frame_id);
       continue;
     }
 
     const auto& anchor = anchors[*anchor_idx];
-    auto attrs = buildSubKeyframeAttrs(anchor.id,
-                                       anchor.world_T_anchor,
-                                       request.world_T_subframe,
-                                       request.timestamp_ns,
-                                       request.image_folder);
-    const auto partition = config.subkeyframe_partition;
-    graph.emplaceNode(
-        layer_key->layer,
-        subKeyframeNodeId(partition, prefix.id, next_subkeyframe_index_++),
-        std::move(attrs),
-        partition);
+    image_store_->setAnchor(
+        frame.frame_id,
+        anchor.id,
+        computeRelativeTransform(anchor.world_T_anchor, frame.world_T_body));
   }
 }
 

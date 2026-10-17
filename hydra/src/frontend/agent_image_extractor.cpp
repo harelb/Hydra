@@ -42,6 +42,8 @@
 #include <spark_dsg/node_attributes.h>
 #include <spark_dsg/node_symbol.h>
 
+#include "hydra/common/global_info.h"
+#include "hydra/frontend/subkeyframe_anchor.h"
 #include "hydra/input/camera.h"
 #include "hydra/utils/timing_utilities.h"
 
@@ -64,14 +66,14 @@ void declare_config(AgentImageExtractor::Config& config) {
   using namespace config;
   name("AgentImageExtractor::Config");
   base<VerbosityConfig>(config);
-  field<Path>(config.image_output_path, "image_output_path");
+  field<Path>(config.image_store_path, "image_store_path");
   field(config.sensor_name, "sensor_name");
   field(config.gate, "gate");
   field(config.max_pairing_time_diff_s, "max_pairing_time_diff_s", "s");
   field(config.max_buffered_frames, "max_buffered_frames");
   field(config.max_deferred_updates, "max_deferred_updates");
 
-  check<Path::IsSet>(config.image_output_path, "image_output_path");
+  check<Path::IsSet>(config.image_store_path, "image_store_path");
   check(config.max_pairing_time_diff_s, GE, 0.0, "max_pairing_time_diff_s");
   check(config.max_buffered_frames, GT, size_t(0), "max_buffered_frames");
   check(config.max_deferred_updates, GT, size_t(0), "max_deferred_updates");
@@ -83,7 +85,12 @@ AgentImageExtractor::Config::Config()
 AgentImageExtractor::AgentImageExtractor(const Config& config)
     : config(config::checkValid(config)),
       gate_(config.gate),
-      writer_(config.image_output_path, utils::kAgentKeyframePrefix) {}
+      store_(ImageStore::open(config.image_store_path)) {
+  if (!store_) {
+    LOG(ERROR) << config.prefix << "Failed to open image store at "
+               << config.image_store_path << "; agent keyframes are not saved";
+  }
+}
 
 void AgentImageExtractor::call(const ActiveWindowOutput& msg,
                                SharedDsgInfo&,
@@ -105,6 +112,7 @@ void AgentImageExtractor::call(const ActiveWindowOutput& msg,
     // copied (into their on-disk format)
     BufferedFrame frame;
     frame.timestamp_ns = data->timestamp_ns;
+    frame.sensor = sensor.name;
     frame.world_T_body = data->world_T_body;
     if (!data->color_image.empty()) {
       frame.color = colorToKeyframe(data->color_image);
@@ -113,13 +121,14 @@ void AgentImageExtractor::call(const ActiveWindowOutput& msg,
     frame.depth = depthToKeyframe(data->depth_image);
 
     std::lock_guard<std::mutex> lock(frame_mutex_);
-    if (!calib_) {
+    if (!calibs_.count(sensor.name)) {
       const auto camera = dynamic_cast<const Camera*>(&sensor);
       if (camera) {
-        calib_ = CameraCalib::fromCamera(*camera);
+        calibs_[sensor.name] = CameraCalib::fromCamera(*camera);
       } else {
         LOG_FIRST_N(WARNING, 1) << config.prefix << "Sensor '" << sensor.name
-                                << "' is not a camera; skipping calibration export";
+                                << "' is not a camera; storing empty calibration";
+        calibs_[sensor.name] = CameraCalib();
       }
     }
 
@@ -211,7 +220,10 @@ std::vector<AgentImageExtractor::Keyframe> AgentImageExtractor::selectKeyframes(
 
     search_start = *frame_idx + 1;
     if (gate_.shouldTrigger(attrs->position, attrs->world_R_body)) {
-      keyframes.push_back({node_id, node_ns, frames[*frame_idx]});
+      Eigen::Isometry3d world_T_node = Eigen::Isometry3d::Identity();
+      world_T_node.translation() = attrs->position;
+      world_T_node.linear() = attrs->world_R_body.toRotationMatrix();
+      keyframes.push_back({node_id, node_ns, world_T_node, frames[*frame_idx]});
     }
   }
 
@@ -227,13 +239,13 @@ void AgentImageExtractor::callPostUpdate(SharedDsgInfo& dsg, FrontendOutput& out
     return;
   }
 
-  // copies of the frame headers keep disk writes out of the critical sections
+  // copies of the frame headers keep the store out of the critical sections
   std::vector<BufferedFrame> frames;
-  std::optional<CameraCalib> calib;
+  std::map<std::string, CameraCalib> calibs;
   {
     std::lock_guard<std::mutex> lock(frame_mutex_);
     frames.assign(frames_.begin(), frames_.end());
-    calib = calib_;
+    calibs = calibs_;
   }
 
   std::vector<Keyframe> keyframes;
@@ -250,35 +262,27 @@ void AgentImageExtractor::callPostUpdate(SharedDsgInfo& dsg, FrontendOutput& out
     }
   }
 
-  if (keyframes.empty()) {
+  if (keyframes.empty() || !store_) {
     return;
   }
 
-  if (calib) {
-    writer_.writeCalib(*calib);
-  }
-
-  std::vector<std::pair<spark_dsg::NodeId, std::string>> written;
+  const auto robot_id = GlobalInfo::instance().getRobotPrefix().id;
   for (const auto& keyframe : keyframes) {
     const auto& frame = keyframe.frame;
-    const nlohmann::json meta{{"frame_timestamp_ns", frame.timestamp_ns},
-                              {"world_T_body", isometryToJson(frame.world_T_body)}};
-    if (!writer_.write(keyframe.node_ns, frame.color, frame.depth, meta)) {
-      continue;
-    }
-
-    written.emplace_back(keyframe.node, writer_.imageFolder(keyframe.node_ns));
+    ImageStore::Frame record;
+    record.robot_id = robot_id;
+    const auto calib = calibs.find(frame.sensor);
+    record.sensor_id = store_->addSensor(
+        robot_id, frame.sensor, calib == calibs.end() ? CameraCalib() : calib->second);
+    record.timestamp_ns = frame.timestamp_ns;
+    record.kind = ImageStore::FrameKind::Keyframe;
+    record.world_T_body = frame.world_T_body;
+    record.anchor_node = keyframe.node;
+    record.anchor_T_body =
+        computeRelativeTransform(keyframe.world_T_node, frame.world_T_body);
+    store_->addFrame(record, frame.color, frame.depth);
     MLOG(3) << "Saved keyframe for agent " << NodeSymbol(keyframe.node).str() << " @ "
             << keyframe.node_ns << " [ns]";
-  }
-
-  std::lock_guard<std::mutex> lock(dsg.mutex);
-  for (const auto& [node_id, folder] : written) {
-    const auto node = dsg.graph->findNode(node_id);
-    const auto attrs = node ? node->tryAttributes<AgentNodeAttributes>() : nullptr;
-    if (attrs) {
-      attrs->image_folder = folder;
-    }
   }
 }
 

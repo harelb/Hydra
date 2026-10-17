@@ -37,7 +37,6 @@
 
 #include <chrono>
 
-#include "hydra/common/sub_keyframes.h"
 #include "hydra/frontend/subkeyframe_anchor.h"
 
 namespace hydra {
@@ -116,26 +115,6 @@ TEST(SubkeyframeAnchor, RelativeTransformComposesBack) {
   EXPECT_NEAR(rel.translation().x(), 0.5, 1e-9);
 }
 
-TEST(SubkeyframeAnchor, BuildsAttrsWithWorldPositionFromAnchor) {
-  Eigen::Isometry3d world_T_anchor = Eigen::Isometry3d::Identity();
-  world_T_anchor.translation() = Eigen::Vector3d(2, 0, 0);
-  Eigen::Isometry3d world_T_sub = Eigen::Isometry3d::Identity();
-  world_T_sub.translation() = Eigen::Vector3d(2.3, 0, 0);
-
-  auto attrs = buildSubKeyframeAttrs(/*anchor_id=*/5u,
-                                     world_T_anchor,
-                                     world_T_sub,
-                                     /*ts_ns=*/1234,
-                                     "/data/subkf_1234");
-  EXPECT_EQ(attrs->anchor_node_id, 5u);
-  EXPECT_EQ(attrs->image_folder, "/data/subkf_1234");
-  EXPECT_EQ(attrs->timestamp.count(), 1234);
-  // initial world position seeded from world_T_sub (refined by backend later)
-  EXPECT_TRUE(attrs->position.isApprox(Eigen::Vector3d(2.3, 0, 0)));
-  // anchor_t_subframe = anchor^-1 * sub = (0.3, 0, 0)
-  EXPECT_NEAR(attrs->anchor_t_subframe.x(), 0.3, 1e-9);
-}
-
 // Only anchors within the time window of the newest anchor are kept
 TEST(SubkeyframeAnchor, WindowDropsOldAnchors) {
   spark_dsg::SceneGraph graph;
@@ -192,15 +171,39 @@ TEST(SubkeyframeAnchor, WindowReadsLatestPoses) {
   EXPECT_EQ(anchors[*idx].id, spark_dsg::NodeSymbol('a', 1));
 }
 
-// Sub-keyframe indices restart per robot, so ids encode the robot
-TEST(SubkeyframeAnchor, NodeIdsUniquePerRobot) {
-  const spark_dsg::NodeSymbol first(subKeyframeNodeId('k', 0, 5));
-  const spark_dsg::NodeSymbol second(subKeyframeNodeId('k', 1, 5));
-  EXPECT_NE(subKeyframeNodeId('k', 0, 5), subKeyframeNodeId('k', 1, 5));
-  EXPECT_EQ(first.category(), 'k');
-  EXPECT_EQ(first.categoryId(), 5u);
-  EXPECT_EQ(second.category(), 'k');
-  EXPECT_EQ(second.categoryId(), (size_t(1) << 48) | 5);
+// Neighbors are the anchors on both sides of a timestamp
+TEST(SubkeyframeAnchor, WindowNeighbors) {
+  spark_dsg::SceneGraph graph;
+  AnchorWindow window(/*window_ns=*/10000);
+  EXPECT_FALSE(window.newest());
+  for (size_t i = 0; i < 4; ++i) {
+    addAgent(graph, i, 100 * (i + 1), Eigen::Vector3d(i, 0, 0));
+    window.update(graph, {spark_dsg::NodeSymbol('a', i)});
+  }
+
+  EXPECT_EQ(window.newest(), 400u);
+  auto neighbors = window.neighbors(graph, 250);
+  ASSERT_EQ(neighbors.size(), 2u);
+  EXPECT_EQ(neighbors[0].timestamp_ns, 200u);
+  EXPECT_EQ(neighbors[1].timestamp_ns, 300u);
+  EXPECT_TRUE(
+      neighbors[1].world_T_anchor.translation().isApprox(Eigen::Vector3d(2, 0, 0)));
+
+  // exact matches are the anchor after
+  neighbors = window.neighbors(graph, 300);
+  ASSERT_EQ(neighbors.size(), 2u);
+  EXPECT_EQ(neighbors[1].timestamp_ns, 300u);
+  const auto idx = selectNearestAnchor(neighbors, 300, Eigen::Vector3d(2, 0, 0), 0.1);
+  ASSERT_TRUE(idx);
+  EXPECT_EQ(neighbors[*idx].id, spark_dsg::NodeSymbol('a', 2));
+
+  // before the first and after the last anchor
+  neighbors = window.neighbors(graph, 50);
+  ASSERT_EQ(neighbors.size(), 1u);
+  EXPECT_EQ(neighbors[0].timestamp_ns, 100u);
+  neighbors = window.neighbors(graph, 500);
+  ASSERT_EQ(neighbors.size(), 1u);
+  EXPECT_EQ(neighbors[0].timestamp_ns, 400u);
 }
 
 }  // namespace hydra

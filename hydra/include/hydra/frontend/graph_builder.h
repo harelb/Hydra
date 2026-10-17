@@ -45,7 +45,6 @@
 #include "hydra/common/output_sink.h"
 #include "hydra/common/shared_dsg_info.h"
 #include "hydra/common/shared_module_state.h"
-#include "hydra/common/sub_keyframes.h"
 #include "hydra/frontend/frontend_output.h"
 #include "hydra/frontend/graph_builder_functor.h"
 #include "hydra/frontend/graph_connector.h"
@@ -53,6 +52,7 @@
 #include "hydra/frontend/mesh_segmenter.h"
 #include "hydra/frontend/subkeyframe_anchor.h"
 #include "hydra/frontend/surface_place_extractor.h"
+#include "hydra/utils/image_store.h"
 #include "hydra/utils/logging.h"
 
 namespace kimera_pgmo {
@@ -98,12 +98,14 @@ class GraphBuilder : public Module {
     config::VirtualConfig<GraphBuilderFunctor> frontier_places;
     //! Optional functor saving images for agent nodes (e.g., AgentImageExtractor)
     config::VirtualConfig<GraphBuilderFunctor> agent_extractor;
-    //! Maximum distance [m] between a sub-keyframe and its anchor agent node
-    double subkeyframe_anchor_max_dist_m = 2.0;
-    //! Time window [s] of recent agent nodes considered as sub-keyframe anchors
-    double subkeyframe_anchor_window_s = 30.0;
-    //! Partition of the agents layer (and node symbol category) for sub-keyframes
-    char subkeyframe_partition = kDefaultSubKeyframePartition;
+    //! Image store (see ImageStore) whose unanchored frames (e.g., sub-keyframes and
+    //! object observations) are anchored to agent nodes and that records which node
+    //! each object track became. Empty disables both
+    std::filesystem::path image_store_path;
+    //! Maximum distance [m] between a frame and its anchor agent node
+    double frame_anchor_max_dist_m = 2.0;
+    //! Time window [s] of recent agent nodes considered as frame anchors
+    double frame_anchor_window_s = 120.0;
 
     //! Output sinks and visualization
     std::vector<Sink::Factory> sinks;
@@ -151,8 +153,8 @@ class GraphBuilder : public Module {
 
   void updatePlaces2d(const ActiveWindowOutput& msg);
 
-  //! Create sub-keyframe nodes for pending requests (see PipelineQueues)
-  void updateSubKeyframes();
+  //! Anchor the frames of the image store that are waiting for an agent node
+  void anchorPendingFrames();
 
  protected:
   InputQueue::Ptr queue_;
@@ -176,10 +178,10 @@ class GraphBuilder : public Module {
   std::unique_ptr<MeshSegmenter> segmenter_;
   std::unique_ptr<SurfacePlaceExtractor> surface_places_;
   std::map<std::string, std::unique_ptr<GraphBuilderFunctor>> functors_;
-  //! Index of the next sub-keyframe node
-  size_t next_subkeyframe_index_ = 0;
-  //! Recent agent nodes of this robot that sub-keyframes can be anchored to
-  AnchorWindow subkeyframe_anchors_;
+  //! Image store (if configured)
+  ImageStore::Ptr image_store_;
+  //! Recent agent nodes of this robot that frames can be anchored to
+  AnchorWindow frame_anchors_;
 
   OutputQueue::Ptr lcd_input_queue_;
 

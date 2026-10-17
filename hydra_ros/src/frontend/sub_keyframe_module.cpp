@@ -40,10 +40,10 @@
 #include <config_utilities/types/path.h>
 #include <config_utilities/validation.h>
 #include <glog/logging.h>
+#include <hydra/common/global_info.h>
 #include <hydra/common/pipeline_queues.h>
 #include <hydra/input/camera.h>
 #include <hydra/input/sensor_input_packet.h>
-#include <hydra/utils/image_folder.h>
 
 namespace hydra {
 namespace {
@@ -59,12 +59,12 @@ void declare_config(SubKeyframeModule::Config& config) {
   using namespace config;
   name("SubKeyframeModule::Config");
   base<VerbosityConfig>(config);
-  field<Path>(config.image_output_path, "image_output_path");
+  field<Path>(config.image_store_path, "image_store_path");
   field(config.sensor_name, "sensor_name");
   field(config.gate, "gate");
   field(config.tf_lookup, "tf_lookup");
   field(config.queue_max_size, "queue_max_size");
-  check<Path::IsSet>(config.image_output_path, "image_output_path");
+  check<Path::IsSet>(config.image_store_path, "image_store_path");
 }
 
 SubKeyframeModule::Config::Config()
@@ -73,7 +73,13 @@ SubKeyframeModule::Config::Config()
 SubKeyframeModule::SubKeyframeModule(const Config& config)
     : config(config::checkValid(config)),
       gate_(config.gate),
-      writer_(config.image_output_path, utils::kSubKeyframePrefix) {
+      store_(ImageStore::open(config.image_store_path)) {
+  if (!store_) {
+    LOG(ERROR) << config.prefix << "Failed to open image store at "
+               << config.image_store_path << "; sub-keyframes are not saved";
+    return;
+  }
+
   // images are accepted as soon as the module exists, i.e., before any input
   PipelineQueues::instance().enableSubKeyframes(config.queue_max_size,
                                                 config.sensor_name);
@@ -104,7 +110,7 @@ std::string SubKeyframeModule::printInfo() const { return config::toString(confi
 
 bool SubKeyframeModule::processInput(const SubKeyframeInput& input,
                                      const Eigen::Isometry3d& world_T_body) {
-  if (!input.parse ||
+  if (!store_ || !input.parse ||
       !gate_.shouldTrigger(world_T_body.translation(),
                            Eigen::Quaterniond(world_T_body.rotation()))) {
     return false;
@@ -115,23 +121,17 @@ bool SubKeyframeModule::processInput(const SubKeyframeInput& input,
     return false;
   }
 
+  const auto robot_id = GlobalInfo::instance().getRobotPrefix().id;
   const auto camera = dynamic_cast<const Camera*>(input.sensor.get());
-  if (camera) {
-    writer_.writeCalib(CameraCalib::fromCamera(*camera));
-  }
-
-  const auto timestamp_ns = packet->timestamp_ns;
-  const nlohmann::json meta{{"world_T_body", isometryToJson(world_T_body)}};
-  if (!writer_.write(timestamp_ns,
-                     colorToKeyframe(packet->color),
-                     depthToKeyframe(packet->depth),
-                     meta)) {
-    return false;
-  }
-
-  // the frontend owns all modifications of the frontend graph
-  PipelineQueues::instance().subkeyframe_node_queue.push(
-      {timestamp_ns, world_T_body, writer_.imageFolder(timestamp_ns)}, false);
+  const auto name = input.sensor ? input.sensor->name : std::string();
+  ImageStore::Frame frame;
+  frame.robot_id = robot_id;
+  frame.sensor_id = store_->addSensor(
+      robot_id, name, camera ? CameraCalib::fromCamera(*camera) : CameraCalib());
+  frame.timestamp_ns = packet->timestamp_ns;
+  frame.kind = ImageStore::FrameKind::SubKeyframe;
+  frame.world_T_body = world_T_body;
+  store_->addFrame(frame, colorToKeyframe(packet->color), packet->depth);
   return true;
 }
 

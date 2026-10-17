@@ -57,7 +57,6 @@ void PipelineQueues::clear() {
   backend_lcd_queue.clear();
   external_loop_closure_queue.clear();
   subkeyframe_queue.clear();
-  subkeyframe_node_queue.clear();
 }
 
 void PipelineQueues::enableSubKeyframes(size_t max_queue_size,
@@ -72,18 +71,12 @@ void PipelineQueues::enableSubKeyframes(size_t max_queue_size,
     subkeyframe_queue.max_size = max_queue_size;
   }
 
-  {
-    std::lock_guard<std::mutex> lock(subkeyframe_node_queue.mutex);
-    subkeyframe_node_queue.max_size = max_queue_size;
-  }
-
   subkeyframes_enabled_ = true;
 }
 
 void PipelineQueues::disableSubKeyframes() {
   subkeyframes_enabled_ = false;
   subkeyframe_queue.clear();
-  subkeyframe_node_queue.clear();
 }
 
 bool PipelineQueues::acceptsSubKeyframes(const std::string& sensor_name) const {

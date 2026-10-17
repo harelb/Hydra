@@ -34,7 +34,8 @@
  * -------------------------------------------------------------------------- */
 #include "hydra/frontend/subkeyframe_anchor.h"
 
-#include <chrono>
+#include <algorithm>
+#include <iterator>
 #include <limits>
 
 namespace hydra {
@@ -72,21 +73,67 @@ void AnchorWindow::update(const SceneGraph& graph,
   }
 }
 
+namespace {
+
+std::optional<AnchorCandidate> getCandidate(const SceneGraph& graph,
+                                            NodeId node_id,
+                                            uint64_t stamp) {
+  const auto node = graph.findNode(node_id);
+  const auto attrs = node ? node->tryAttributes<AgentNodeAttributes>() : nullptr;
+  if (!attrs) {
+    return std::nullopt;
+  }
+
+  // the pose is read from the graph so that it reflects the latest agent pose
+  Eigen::Isometry3d world_T_anchor = Eigen::Isometry3d::Identity();
+  world_T_anchor.translation() = attrs->position;
+  world_T_anchor.linear() = attrs->world_R_body.toRotationMatrix();
+  return AnchorCandidate{node_id, stamp, world_T_anchor};
+}
+
+}  // namespace
+
+std::vector<AnchorCandidate> AnchorWindow::neighbors(const SceneGraph& graph,
+                                                     uint64_t timestamp_ns) const {
+  std::vector<AnchorCandidate> result;
+  const auto after = std::lower_bound(
+      anchors_.begin(), anchors_.end(), timestamp_ns, [](const auto& anchor, auto stamp) {
+        return anchor.second < stamp;
+      });
+  if (after != anchors_.begin()) {
+    const auto& [node_id, stamp] = *std::prev(after);
+    const auto candidate = getCandidate(graph, node_id, stamp);
+    if (candidate) {
+      result.push_back(*candidate);
+    }
+  }
+
+  if (after != anchors_.end()) {
+    const auto candidate = getCandidate(graph, after->first, after->second);
+    if (candidate) {
+      result.push_back(*candidate);
+    }
+  }
+
+  return result;
+}
+
+std::optional<uint64_t> AnchorWindow::newest() const {
+  if (anchors_.empty()) {
+    return std::nullopt;
+  }
+
+  return anchors_.back().second;
+}
+
 std::vector<AnchorCandidate> AnchorWindow::candidates(const SceneGraph& graph) const {
   std::vector<AnchorCandidate> result;
   result.reserve(anchors_.size());
   for (const auto& [node_id, stamp] : anchors_) {
-    const auto node = graph.findNode(node_id);
-    const auto attrs = node ? node->tryAttributes<AgentNodeAttributes>() : nullptr;
-    if (!attrs) {
-      continue;
+    const auto candidate = getCandidate(graph, node_id, stamp);
+    if (candidate) {
+      result.push_back(*candidate);
     }
-
-    // the pose is read from the graph so that it reflects the latest agent pose
-    Eigen::Isometry3d world_T_anchor = Eigen::Isometry3d::Identity();
-    world_T_anchor.translation() = attrs->position;
-    world_T_anchor.linear() = attrs->world_R_body.toRotationMatrix();
-    result.push_back({node_id, stamp, world_T_anchor});
   }
 
   return result;
@@ -125,24 +172,6 @@ std::optional<size_t> selectNearestAnchor(const std::vector<AnchorCandidate>& an
 Eigen::Isometry3d computeRelativeTransform(const Eigen::Isometry3d& world_T_anchor,
                                            const Eigen::Isometry3d& world_T_subframe) {
   return world_T_anchor.inverse() * world_T_subframe;
-}
-
-std::unique_ptr<spark_dsg::SubKeyframeNodeAttributes> buildSubKeyframeAttrs(
-    spark_dsg::NodeId anchor_id,
-    const Eigen::Isometry3d& world_T_anchor,
-    const Eigen::Isometry3d& world_T_subframe,
-    uint64_t timestamp_ns,
-    const std::string& image_folder) {
-  auto attrs = std::make_unique<spark_dsg::SubKeyframeNodeAttributes>();
-  attrs->anchor_node_id = anchor_id;
-  const Eigen::Isometry3d rel =
-      computeRelativeTransform(world_T_anchor, world_T_subframe);
-  attrs->anchor_t_subframe = rel.translation();
-  attrs->anchor_R_subframe = Eigen::Quaterniond(rel.rotation());
-  attrs->position = world_T_subframe.translation();
-  attrs->image_folder = image_folder;
-  attrs->timestamp = std::chrono::nanoseconds(timestamp_ns);
-  return attrs;
 }
 
 }  // namespace hydra
