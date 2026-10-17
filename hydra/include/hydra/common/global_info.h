@@ -43,6 +43,7 @@
 #include "hydra/common/labelspace.h"
 #include "hydra/common/robot_prefix_config.h"
 #include "hydra/common/shared_dsg_info.h"
+#include "hydra/utils/image_store.h"
 
 // TODO(nathan) bad....
 #include "hydra/active_window/volumetric_window.h"
@@ -102,6 +103,9 @@ struct PipelineConfig {
   std::filesystem::path label_remap_filepath;
   //! Configuration for scene graph mesh fields
   MeshFieldConfig mesh;
+  //! Settings of the image stores opened by path (see ImageStore::open). The path is
+  //! ignored: each module that writes images has its own image_store_path
+  ImageStore::Config image_store;
   //! @brief Layers in the scene graph that use the labelspace
   std::vector<std::string> semantic_layers{spark_dsg::DsgLayers::OBJECTS,
                                            spark_dsg::DsgLayers::MESH_PLACES};

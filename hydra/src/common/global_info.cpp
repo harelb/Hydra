@@ -84,6 +84,7 @@ void declare_config(PipelineConfig& config) {
   field<Path::Absolute>(config.label_remap_filepath, "semantic_label_remap_filepath");
   field(config.mesh, "mesh");
   field(config.semantic_layers, "semantic_layers");
+  field(config.image_store, "image_store");
 
   // the following subconfigs should not be namespaced
   field(config.frames, "frames", false);
@@ -108,6 +109,8 @@ void GlobalInfo::initFromConfig(const PipelineConfig& config, int robot_id) {
   if (!config_.label_remap_filepath.empty()) {
     label_remapper_ = LabelRemapper(config_.label_remap_filepath);
   }
+
+  ImageStore::setDefaultConfig(config_.image_store);
 
   if (config_.enable_pgmo_logging) {
     logging::Logger::addSink("glog", std::make_shared<PgmoGlogSink>());

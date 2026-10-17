@@ -29,7 +29,6 @@ add_executable(
   frontend/test_agent_image_extractor.cpp
   frontend/test_graph_connector.cpp
   frontend/test_keyframe_gate.cpp
-  frontend/test_keyframe_writer.cpp
   frontend/test_mesh_compression.cpp
   frontend/test_mesh_segmenter.cpp
   frontend/test_subkeyframe_anchor.cpp
@@ -67,7 +66,7 @@ add_executable(
   rooms/test_room_finder.cpp
   rooms/test_room_utilities.cpp
   utils/test_active_window_tracker.cpp
-  utils/test_image_folder.cpp
+  utils/test_image_store.cpp
   utils/test_mesh_utilities.cpp
   utils/test_minimum_spanning_tree.cpp
   utils/test_nearest_neighbor_utilities.cpp
@@ -79,6 +78,7 @@ target_include_directories(
 )
 target_link_libraries(
   test_${PROJECT_NAME} ${PROJECT_NAME} ${gflags_LIBRARIES} GTest::gtest_main
+  SQLite::SQLite3
 )
 gtest_add_tests(TARGET test_${PROJECT_NAME})
 
