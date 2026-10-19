@@ -551,6 +551,15 @@ void ImageStore::Impl::loadState() {
   while (alias_query.step()) {
     aliases[alias_query.integer(0)] = alias_query.integer(1);
   }
+
+  // Frame and observation ids continue, but scene graph node ids and track ids restart
+  // with every Hydra session, so anchors, bindings and aliases written now refer to the
+  // new scene graph and may replace those of the previous session
+  LOG_IF(WARNING, !frames.empty() || !bindings.empty() || !aliases.empty())
+      << "[ImageStore] " << config.path << " already holds " << frames.size()
+      << " frame(s), " << bindings.size() << " track binding(s) and " << aliases.size()
+      << " node alias(es) from an earlier session; node and track ids of this session "
+         "can collide with them";
 }
 
 void ImageStore::Impl::prepareStatements() {
