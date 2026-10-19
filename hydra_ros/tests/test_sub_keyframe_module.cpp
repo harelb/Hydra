@@ -105,7 +105,27 @@ queue_max_size: 30
   EXPECT_DOUBLE_EQ(config.gate.min_rotation_deg, 15.0);
   EXPECT_EQ(config.queue_max_size, 30u);
   EXPECT_TRUE(config::isValid(config));
-  EXPECT_FALSE(config::isValid(SubKeyframeModule::Config()));
+  EXPECT_TRUE(config::isValid(SubKeyframeModule::Config()));
+}
+
+// An empty store path disables the module: the hand-off queue stays closed and
+// nothing is written
+TEST(SubKeyframeModule, EmptyPathDisables) {
+  SubKeyframeModule::Config config;
+  config.sensor_name = "camera";
+  auto& queues = PipelineQueues::instance();
+  {
+    SubKeyframeModule module(config);
+    EXPECT_FALSE(module.enabled());
+    EXPECT_FALSE(queues.acceptsSubKeyframes("camera"));
+    module.start();
+    const auto sensor = std::make_shared<Camera>(makeCameraConfig(), "camera");
+    EXPECT_FALSE(
+        module.processInput(makeInput(sensor, 10), Eigen::Isometry3d::Identity()));
+    module.stop();
+  }
+
+  EXPECT_FALSE(queues.acceptsSubKeyframes("camera"));
 }
 
 // The module enables the hand-off queue and writes gated images as unanchored frames

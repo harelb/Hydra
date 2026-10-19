@@ -68,7 +68,8 @@ class AgentImageExtractor : public GraphBuilderFunctor {
   struct Config : public VerbosityConfig {
     Config();
 
-    //! Directory of the image store to save keyframes to (required, see ImageStore)
+    //! Directory of the image store to save keyframes to (see ImageStore). Empty
+    //! disables the extractor
     std::filesystem::path image_store_path;
     //! Name of the sensor to save images from (empty accepts any sensor)
     std::string sensor_name;
@@ -85,6 +86,10 @@ class AgentImageExtractor : public GraphBuilderFunctor {
   } const config;
 
   explicit AgentImageExtractor(const Config& config);
+
+  //! Whether keyframes are written (false if the store path is empty or the store
+  //! could not be opened)
+  bool enabled() const { return store_ != nullptr; }
 
   //! Buffers the sensor frames of all inputs (deep copies in the on-disk format)
   void call(const ActiveWindowOutput& msg,

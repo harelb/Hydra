@@ -64,7 +64,6 @@ void declare_config(SubKeyframeModule::Config& config) {
   field(config.gate, "gate");
   field(config.tf_lookup, "tf_lookup");
   field(config.queue_max_size, "queue_max_size");
-  check<Path::IsSet>(config.image_store_path, "image_store_path");
 }
 
 SubKeyframeModule::Config::Config()
@@ -74,6 +73,11 @@ SubKeyframeModule::SubKeyframeModule(const Config& config)
     : config(config::checkValid(config)),
       gate_(config.gate),
       store_(ImageStore::open(config.image_store_path)) {
+  if (config.image_store_path.empty()) {
+    LOG(INFO) << config.prefix << "No image store path; sub-keyframes are disabled";
+    return;
+  }
+
   if (!store_) {
     LOG(ERROR) << config.prefix << "Failed to open image store at "
                << config.image_store_path << "; sub-keyframes are not saved";
@@ -87,10 +91,16 @@ SubKeyframeModule::SubKeyframeModule(const Config& config)
 
 SubKeyframeModule::~SubKeyframeModule() {
   stopImpl();
-  PipelineQueues::instance().disableSubKeyframes();
+  if (store_) {
+    PipelineQueues::instance().disableSubKeyframes();
+  }
 }
 
 void SubKeyframeModule::start() {
+  if (!store_) {
+    return;  // disabled: the image receivers never queue images
+  }
+
   lookup_ = std::make_unique<TFLookup>(config.tf_lookup);
   should_shutdown_ = false;
   spin_thread_ = std::make_unique<std::thread>(&SubKeyframeModule::spin, this);

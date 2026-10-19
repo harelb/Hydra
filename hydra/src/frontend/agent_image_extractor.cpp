@@ -73,7 +73,6 @@ void declare_config(AgentImageExtractor::Config& config) {
   field(config.max_buffered_frames, "max_buffered_frames");
   field(config.max_deferred_updates, "max_deferred_updates");
 
-  check<Path::IsSet>(config.image_store_path, "image_store_path");
   check(config.max_pairing_time_diff_s, GE, 0.0, "max_pairing_time_diff_s");
   check(config.max_buffered_frames, GT, size_t(0), "max_buffered_frames");
   check(config.max_deferred_updates, GT, size_t(0), "max_deferred_updates");
@@ -86,7 +85,9 @@ AgentImageExtractor::AgentImageExtractor(const Config& config)
     : config(config::checkValid(config)),
       gate_(config.gate),
       store_(ImageStore::open(config.image_store_path)) {
-  if (!store_) {
+  if (config.image_store_path.empty()) {
+    LOG(INFO) << config.prefix << "No image store path; agent keyframes are disabled";
+  } else if (!store_) {
     LOG(ERROR) << config.prefix << "Failed to open image store at "
                << config.image_store_path << "; agent keyframes are not saved";
   }
@@ -96,6 +97,10 @@ void AgentImageExtractor::call(const ActiveWindowOutput& msg,
                                SharedDsgInfo&,
                                FrontendOutput&,
                                const VolumetricWindow*) {
+  if (!store_) {
+    return;  // disabled: nothing is buffered
+  }
+
   // every input (including inputs collated into one update) produces an agent node
   ScopedTimer timer("frontend/agent_images_buffer", msg.timestamp_ns, true, 1, false);
   for (const auto& data : msg.sensor_data) {
@@ -231,6 +236,10 @@ std::vector<AgentImageExtractor::Keyframe> AgentImageExtractor::selectKeyframes(
 }
 
 void AgentImageExtractor::callPostUpdate(SharedDsgInfo& dsg, FrontendOutput& output) {
+  if (!store_) {
+    return;
+  }
+
   ScopedTimer timer("frontend/agent_images", output.timestamp_ns, true, 1, false);
   pending_nodes_.insert(pending_nodes_.end(),
                         output.new_agent_nodes.begin(),
@@ -262,7 +271,7 @@ void AgentImageExtractor::callPostUpdate(SharedDsgInfo& dsg, FrontendOutput& out
     }
   }
 
-  if (keyframes.empty() || !store_) {
+  if (keyframes.empty()) {
     return;
   }
 

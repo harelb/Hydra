@@ -65,8 +65,8 @@ class SubKeyframeModule : public Module {
   struct Config : public VerbosityConfig {
     Config();
 
-    //! Directory of the image store to save sub-keyframes to (required, see
-    //! ImageStore)
+    //! Directory of the image store to save sub-keyframes to (see ImageStore). Empty
+    //! disables the module
     std::filesystem::path image_store_path;
     //! Name of the sensor to capture sub-keyframes from (empty accepts any sensor)
     std::string sensor_name;
@@ -87,6 +87,10 @@ class SubKeyframeModule : public Module {
   void stop() override;
 
   std::string printInfo() const override;
+
+  //! Whether sub-keyframes are captured (false if the store path is empty or the
+  //! store could not be opened)
+  bool enabled() const { return store_ != nullptr; }
 
   //! @brief Process one input (exposed for testing)
   bool processInput(const SubKeyframeInput& input,

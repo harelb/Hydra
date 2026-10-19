@@ -150,9 +150,28 @@ struct ExtractorHarness {
 
 }  // namespace
 
-TEST(AgentImageExtractor, ConfigRequiresOutputPath) {
-  EXPECT_FALSE(config::isValid(AgentImageExtractor::Config()));
+TEST(AgentImageExtractor, ConfigAcceptsEmptyPath) {
+  EXPECT_TRUE(config::isValid(AgentImageExtractor::Config()));
   EXPECT_TRUE(config::isValid(makeConfig("/tmp/run/image_store")));
+}
+
+// An empty store path disables the extractor: nothing is buffered or written
+TEST(AgentImageExtractor, EmptyPathDisables) {
+  ExtractorHarness harness(makeConfig(""));
+  EXPECT_FALSE(harness.extractor.enabled());
+  harness.addFrame(1000);
+  harness.addAgent(0, 1000, 0.0);
+  harness.update();
+  EXPECT_FALSE(ImageStore::open(fs::path()));
+
+  // also when created from a config file
+  const auto node = YAML::Load("{type: AgentImageExtractor, image_store_path: ''}");
+  const auto config =
+      config::fromYaml<config::VirtualConfig<GraphBuilderFunctor>>(node);
+  const auto functor = config.create();
+  const auto extractor = dynamic_cast<const AgentImageExtractor*>(functor.get());
+  ASSERT_TRUE(extractor);
+  EXPECT_FALSE(extractor->enabled());
 }
 
 // The extractor is an optional graph builder functor
