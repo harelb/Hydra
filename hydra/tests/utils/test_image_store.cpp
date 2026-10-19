@@ -38,9 +38,11 @@
 #include <sqlite3.h>
 
 #include <atomic>
+#include <filesystem>
+#include <fstream>
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
-#include <filesystem>
+#include <sstream>
 #include <thread>
 
 #include "hydra_test/image_store_query.h"
@@ -86,6 +88,52 @@ std::string id(uint64_t value) { return std::to_string(static_cast<int64_t>(valu
 
 std::string count(const fs::path& dir, const std::string& table) {
   return test::queryValue(dir, "SELECT COUNT(*) FROM " + table);
+}
+
+std::string readFile(const fs::path& path) {
+  std::ifstream in(path);
+  std::stringstream ss;
+  ss << in.rdbuf();
+  return ss.str();
+}
+
+void writeFile(const fs::path& path, const std::string& contents) {
+  fs::create_directories(path.parent_path());
+  std::ofstream(path) << contents;
+}
+
+size_t numEntries(const fs::path& dir) {
+  if (!fs::exists(dir)) {
+    return 0;
+  }
+
+  return std::distance(fs::directory_iterator(dir), fs::directory_iterator());
+}
+
+// Leave a store at `path` as an earlier process would: it is written under a directory
+// that was never opened at `path` in this process and moved into place afterwards
+void makeEarlierSession(const fs::path& path, uint64_t num_frames) {
+  static size_t index = 0;
+  const auto staging = path.parent_path() / ("staging_" + std::to_string(index++) +
+                                             "_" + path.filename().string());
+  {
+    ImageStore::Config config;
+    config.path = staging;
+    auto store = ImageStore::open(config);
+    ASSERT_TRUE(store);
+    const auto sensor = store->addSensor(0, "camera", makeCalib());
+    for (uint64_t i = 0; i < num_frames; ++i) {
+      auto frame = makeFrame(sensor, 100 * (i + 1), ImageStore::FrameKind::Keyframe);
+      frame.anchor_node = NodeSymbol('a', i);
+      store->addFrame(frame, makeColor());
+    }
+
+    store->bindTrack(0, 1, NodeSymbol('O', 1));
+    store->recordMerges({{NodeSymbol('O', 2), NodeSymbol('O', 1)}});
+  }
+
+  fs::create_directories(path.parent_path());
+  fs::rename(staging, path);
 }
 
 }  // namespace
@@ -611,6 +659,155 @@ TEST(ImageStore, RejectsOtherSchemaVersion) {
             SQLITE_OK);
   sqlite3_close(db);
   EXPECT_FALSE(ImageStore::open(tmp.path));
+}
+
+// A store left by an earlier session is moved to sessions/<k> with its scene graph
+TEST(ImageStore, RotatesEarlierSession) {
+  test::TempDirectory tmp;
+  const auto run = tmp.path / "run";
+  const auto path = run / "image_store";
+  makeEarlierSession(path, 3);
+  writeFile(run / "hydra/backend/dsg.json", "backend graph");
+  writeFile(run / "hydra/frontend/dsg.json", "frontend graph");
+  writeFile(run / "hydra/frontend/mesh.ply", "mesh");
+  writeFile(run / "hydra/timing/ignored.csv", "timing");
+
+  ImageStore::Config config;
+  config.path = path;
+  config.session_artifacts_dir = run / "hydra";
+  auto store = ImageStore::open(config);
+  ASSERT_TRUE(store);
+
+  // the new session starts empty and numbers its ids from zero again
+  const auto sensor = store->addSensor(0, "camera", makeCalib());
+  EXPECT_EQ(store->addFrame(makeFrame(sensor, 100, ImageStore::FrameKind::Keyframe)),
+            ImageStore::makeId(0, 0));
+  store->flush();
+  EXPECT_EQ(count(path, "frames"), "1");
+  EXPECT_EQ(count(path, "track_bindings"), "0");
+  EXPECT_EQ(count(path, "node_aliases"), "0");
+  EXPECT_FALSE(fs::exists(path / "frames/r0/100_rgb.jpg"));
+
+  // the earlier session is intact under sessions/1
+  const auto session = run / "sessions/1";
+  const auto archived = session / "image_store";
+  EXPECT_EQ(count(archived, "frames"), "3");
+  EXPECT_EQ(count(archived, "track_bindings"), "1");
+  EXPECT_EQ(count(archived, "node_aliases"), "1");
+  EXPECT_TRUE(fs::exists(archived / "frames/r0/300_rgb.jpg"));
+  EXPECT_EQ(test::queryValue(archived,
+                             "SELECT rgb_path FROM frames WHERE timestamp_ns = 300"),
+            "frames/r0/300_rgb.jpg");
+
+  // with a copy of its scene graph (the originals stay where they are)
+  EXPECT_EQ(readFile(session / "hydra/backend/dsg.json"), "backend graph");
+  EXPECT_EQ(readFile(session / "hydra/frontend/dsg.json"), "frontend graph");
+  EXPECT_EQ(readFile(session / "hydra/frontend/mesh.ply"), "mesh");
+  EXPECT_FALSE(fs::exists(session / "hydra/timing"));
+  EXPECT_EQ(readFile(run / "hydra/backend/dsg.json"), "backend graph");
+
+  const auto summary = readFile(session / "session.json");
+  EXPECT_NE(summary.find("\"session\": \"1\""), std::string::npos) << summary;
+  EXPECT_NE(summary.find("\"store\": \"image_store\""), std::string::npos) << summary;
+  EXPECT_NE(summary.find("\"keyframes\": 3"), std::string::npos) << summary;
+  EXPECT_NE(summary.find("\"track_bindings\": 1"), std::string::npos) << summary;
+  EXPECT_NE(summary.find("\"robot_ids\": [0]"), std::string::npos) << summary;
+  EXPECT_NE(summary.find("\"artifacts_dir\": \"hydra\""), std::string::npos) << summary;
+  EXPECT_NE(summary.find("\"backend/dsg.json\""), std::string::npos) << summary;
+  EXPECT_NE(summary.find("\"artifacts_missing\": [\"backend/dsg_with_mesh.json\""),
+            std::string::npos)
+      << summary;
+  EXPECT_EQ(numEntries(run / "sessions"), 1u);
+}
+
+// Empty or missing store directories are opened in place
+TEST(ImageStore, EmptyStoreDoesNotRotate) {
+  test::TempDirectory tmp;
+  fs::create_directories(tmp.path / "empty/image_store");
+  EXPECT_TRUE(ImageStore::open(tmp.path / "empty/image_store"));
+  EXPECT_TRUE(ImageStore::open(tmp.path / "missing/image_store"));
+  EXPECT_FALSE(fs::exists(tmp.path / "empty/sessions"));
+  EXPECT_FALSE(fs::exists(tmp.path / "missing/sessions"));
+  EXPECT_TRUE(fs::exists(tmp.path / "missing/image_store/store.sqlite"));
+}
+
+// Sessions are numbered after the largest existing session
+TEST(ImageStore, SessionIndexIncrements) {
+  test::TempDirectory tmp;
+  const auto run = tmp.path / "run";
+  fs::create_directories(run / "sessions/1");
+  fs::create_directories(run / "sessions/3");
+  fs::create_directories(run / "sessions/notes");
+  makeEarlierSession(run / "image_store", 2);
+  ASSERT_TRUE(ImageStore::open(run / "image_store"));
+  EXPECT_EQ(count(run / "sessions/4/image_store", "frames"), "2");
+
+  makeEarlierSession(run / "other_store", 1);
+  ASSERT_TRUE(ImageStore::open(run / "other_store"));
+  EXPECT_EQ(count(run / "sessions/5/other_store", "frames"), "1");
+  EXPECT_FALSE(fs::exists(run / "sessions/2"));
+  // no artifacts configured
+  const auto summary = readFile(run / "sessions/5/session.json");
+  EXPECT_NE(summary.find("\"artifacts_dir\": null"), std::string::npos) << summary;
+}
+
+// on_existing: append keeps writing into the earlier session's store
+TEST(ImageStore, AppendKeepsEarlierSession) {
+  test::TempDirectory tmp;
+  const auto path = tmp.path / "run/image_store";
+  makeEarlierSession(path, 3);
+  ImageStore::Config config;
+  config.path = path;
+  config.on_existing = ImageStore::OnExisting::Append;
+  auto store = ImageStore::open(config);
+  ASSERT_TRUE(store);
+  const auto sensor = store->addSensor(0, "camera", makeCalib());
+  EXPECT_EQ(store->addFrame(makeFrame(sensor, 400, ImageStore::FrameKind::Keyframe)),
+            ImageStore::makeId(0, 3));
+  store->flush();
+  EXPECT_EQ(count(path, "frames"), "4");
+  EXPECT_EQ(count(path, "track_bindings"), "1");
+  EXPECT_FALSE(fs::exists(tmp.path / "run/sessions"));
+}
+
+// on_existing: fail refuses to open the earlier session's store
+TEST(ImageStore, FailRefusesEarlierSession) {
+  test::TempDirectory tmp;
+  const auto path = tmp.path / "run/image_store";
+  makeEarlierSession(path, 3);
+  ImageStore::Config config;
+  config.path = path;
+  config.on_existing = ImageStore::OnExisting::Fail;
+  EXPECT_FALSE(ImageStore::open(config));
+  EXPECT_FALSE(ImageStore::open(config));
+  EXPECT_EQ(count(path, "frames"), "3");
+  EXPECT_FALSE(fs::exists(tmp.path / "run/sessions"));
+
+  // an empty store opens normally
+  config.path = tmp.path / "fresh/image_store";
+  EXPECT_TRUE(ImageStore::open(config));
+}
+
+// Modules sharing the instance (and later opens in the process) rotate only once
+TEST(ImageStore, SharedInstanceRotatesOnce) {
+  test::TempDirectory tmp;
+  const auto run = tmp.path / "run";
+  makeEarlierSession(run / "image_store", 2);
+  {
+    const auto khronos = ImageStore::open(run / "image_store");
+    const auto hydra = ImageStore::open(run / "image_store/");
+    ASSERT_TRUE(khronos);
+    EXPECT_EQ(khronos.get(), hydra.get());
+    const auto sensor = hydra->addSensor(0, "camera", makeCalib());
+    hydra->addFrame(makeFrame(sensor, 100, ImageStore::FrameKind::Keyframe));
+  }
+
+  // every instance was released: reopening finds this session's store
+  const auto store = ImageStore::open(run / "image_store");
+  ASSERT_TRUE(store);
+  EXPECT_EQ(numEntries(run / "sessions"), 1u);
+  EXPECT_EQ(count(run / "image_store", "frames"), "1");
+  EXPECT_EQ(count(run / "sessions/1/image_store", "frames"), "2");
 }
 
 }  // namespace hydra

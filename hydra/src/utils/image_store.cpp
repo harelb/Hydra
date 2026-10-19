@@ -35,17 +35,24 @@
 #include "hydra/utils/image_store.h"
 
 #include <config_utilities/config.h>
+#include <config_utilities/types/enum.h>
 #include <config_utilities/types/path.h>
 #include <config_utilities/validation.h>
 #include <glog/logging.h>
 #include <sqlite3.h>
+#include <unistd.h>
 
+#include <algorithm>
 #include <bit>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <ctime>
 #include <deque>
+#include <fstream>
 #include <functional>
+#include <iomanip>
 #include <mutex>
 #include <opencv2/imgcodecs.hpp>
 #include <set>
@@ -65,6 +72,13 @@ void declare_config(ImageStore::Config& config) {
   using namespace config;
   name("ImageStore::Config");
   field<Path>(config.path, "path");
+  enum_field(config.on_existing,
+             "on_existing",
+             {{ImageStore::OnExisting::Rotate, "rotate"},
+              {ImageStore::OnExisting::Append, "append"},
+              {ImageStore::OnExisting::Fail, "fail"}});
+  field<Path>(config.session_artifacts_dir, "session_artifacts_dir");
+  field(config.session_artifacts, "session_artifacts");
   field(config.max_images_per_object, "max_images_per_object");
   field(config.jpeg_quality, "jpeg_quality");
   field(config.write_depth, "write_depth");
@@ -551,15 +565,6 @@ void ImageStore::Impl::loadState() {
   while (alias_query.step()) {
     aliases[alias_query.integer(0)] = alias_query.integer(1);
   }
-
-  // Frame and observation ids continue, but scene graph node ids and track ids restart
-  // with every Hydra session, so anchors, bindings and aliases written now refer to the
-  // new scene graph and may replace those of the previous session
-  LOG_IF(WARNING, !frames.empty() || !bindings.empty() || !aliases.empty())
-      << "[ImageStore] " << config.path << " already holds " << frames.size()
-      << " frame(s), " << bindings.size() << " track binding(s) and " << aliases.size()
-      << " node alias(es) from an earlier session; node and track ids of this session "
-         "can collide with them";
 }
 
 void ImageStore::Impl::prepareStatements() {
@@ -756,6 +761,8 @@ struct Registry {
   std::mutex mutex;
   std::condition_variable cv;
   std::map<fs::path, std::weak_ptr<ImageStore>> stores;
+  //! Directories whose earlier contents were handled (see Config::on_existing)
+  std::set<fs::path> prepared;
   ImageStore::Config default_config;
 };
 
@@ -777,6 +784,250 @@ fs::path normalizedPath(const fs::path& path) {
   }
 
   return result;
+}
+
+bool isNonEmptyDirectory(const fs::path& path) {
+  std::error_code ec;
+  if (!fs::is_directory(path, ec)) {
+    return false;
+  }
+
+  return fs::directory_iterator(path, ec) != fs::directory_iterator();
+}
+
+std::string jsonString(const std::string& value) {
+  std::stringstream ss;
+  ss << '"';
+  for (const char c : value) {
+    switch (c) {
+      case '"':
+        ss << "\\\"";
+        break;
+      case '\\':
+        ss << "\\\\";
+        break;
+      case '\n':
+        ss << "\\n";
+        break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          ss << "\\u" << std::hex << std::setw(4) << std::setfill('0') << int(c)
+             << std::dec;
+        } else {
+          ss << c;
+        }
+    }
+  }
+  ss << '"';
+  return ss.str();
+}
+
+std::string jsonStrings(const std::vector<std::string>& values) {
+  std::stringstream ss;
+  ss << "[";
+  for (size_t i = 0; i < values.size(); ++i) {
+    ss << (i ? ", " : "") << jsonString(values[i]);
+  }
+  ss << "]";
+  return ss.str();
+}
+
+std::string utcTimestamp(std::time_t time) {
+  std::tm tm;
+  gmtime_r(&time, &tm);
+  std::stringstream ss;
+  ss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+  return ss.str();
+}
+
+//! JSON object summarizing a store database ("null" if it cannot be read)
+std::string summarizeDatabase(const fs::path& db_path) {
+  if (!fs::exists(db_path)) {
+    return "null";
+  }
+
+  sqlite3* db = nullptr;
+  if (sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) !=
+      SQLITE_OK) {
+    sqlite3_close(db);
+    return "null";
+  }
+
+  std::stringstream ss;
+  ss << "{";
+  bool first = true;
+  const auto add = [&](const std::string& key, const std::string& sql) {
+    try {
+      Statement stmt(db, sql);
+      if (stmt.step() && !stmt.isNull(0)) {
+        ss << (first ? "" : ", ") << jsonString(key) << ": " << stmt.integer(0);
+        first = false;
+      }
+    } catch (const std::exception&) {
+      // tables of an older or partially created store may be missing
+    }
+  };
+
+  add("sensors", "SELECT COUNT(*) FROM sensors");
+  add("frames", "SELECT COUNT(*) FROM frames");
+  add("keyframes", "SELECT COUNT(*) FROM frames WHERE kind = 0");
+  add("subkeyframes", "SELECT COUNT(*) FROM frames WHERE kind = 1");
+  add("observations", "SELECT COUNT(*) FROM observations");
+  add("observations_kept", "SELECT COUNT(*) FROM observations WHERE kept != 0");
+  add("track_bindings", "SELECT COUNT(*) FROM track_bindings");
+  add("node_aliases", "SELECT COUNT(*) FROM node_aliases");
+  add("first_timestamp_ns", "SELECT MIN(timestamp_ns) FROM frames");
+  add("last_timestamp_ns", "SELECT MAX(timestamp_ns) FROM frames");
+  try {
+    Statement stmt(db,
+                   "SELECT robot_id FROM sensors UNION SELECT robot_id FROM frames "
+                   "ORDER BY robot_id");
+    ss << (first ? "" : ", ") << "\"robot_ids\": [";
+    for (bool first_id = true; stmt.step(); first_id = false) {
+      ss << (first_id ? "" : ", ") << stmt.integer(0);
+    }
+    ss << "]";
+  } catch (const std::exception&) {
+  }
+
+  ss << "}";
+  sqlite3_close(db);
+  return ss.str();
+}
+
+//! Create the next session directory <sessions>/<k> (k = 1 + largest existing k)
+fs::path claimSessionDirectory(const fs::path& sessions) {
+  fs::create_directories(sessions);
+  uint64_t last = 0;
+  for (const auto& entry : fs::directory_iterator(sessions)) {
+    const auto name = entry.path().filename().string();
+    if (!name.empty() && name.size() < 16 &&
+        std::all_of(name.begin(), name.end(), [](unsigned char c) {
+          return std::isdigit(c);
+        })) {
+      last = std::max<uint64_t>(last, std::stoull(name));
+    }
+  }
+
+  // create_directory is atomic, so concurrent rotations never share a directory
+  for (uint64_t k = last + 1;; ++k) {
+    const auto dir = sessions / std::to_string(k);
+    if (fs::create_directory(dir)) {
+      return dir;
+    }
+  }
+}
+
+//! Move the store of an earlier session out of the way (see Config::on_existing)
+bool rotateStore(const ImageStore::Config& config) {
+  const auto& path = config.path;
+  const auto session_dir = claimSessionDirectory(path.parent_path() / "sessions");
+  const auto archived = session_dir / path.filename();
+  fs::rename(path, archived);
+  const auto rotated_at = std::time(nullptr);
+
+  std::vector<std::string> copied, missing, failed;
+  fs::path artifacts_dest;
+  if (!config.session_artifacts_dir.empty()) {
+    artifacts_dest = session_dir / config.session_artifacts_dir.filename();
+    for (const auto& relative : config.session_artifacts) {
+      const auto source = config.session_artifacts_dir / relative;
+      std::error_code ec;
+      if (!fs::is_regular_file(source, ec)) {
+        missing.push_back(relative);
+        continue;
+      }
+
+      const auto target = artifacts_dest / relative;
+      fs::create_directories(target.parent_path(), ec);
+      if (!ec) {
+        fs::copy_file(source, target, fs::copy_options::overwrite_existing, ec);
+      }
+
+      if (ec) {
+        LOG(ERROR) << "[ImageStore] Failed to copy " << source << " to " << target
+                   << ": " << ec.message();
+        failed.push_back(relative);
+      } else {
+        copied.push_back(relative);
+      }
+    }
+  }
+
+  std::string last_modified = "null";
+  std::error_code ec;
+  const auto db_time = fs::last_write_time(archived / ImageStore::kDatabaseName, ec);
+  if (!ec) {
+    const auto sys_time =
+        std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            db_time - fs::file_time_type::clock::now() +
+            std::chrono::system_clock::now());
+    last_modified =
+        jsonString(utcTimestamp(std::chrono::system_clock::to_time_t(sys_time)));
+  }
+
+  std::ofstream out(session_dir / "session.json");
+  out << "{\n"
+      << "  \"session\": " << jsonString(session_dir.filename().string()) << ",\n"
+      << "  \"store\": " << jsonString(archived.filename().string()) << ",\n"
+      << "  \"source_store\": " << jsonString(path.string()) << ",\n"
+      << "  \"rotated_at\": " << jsonString(utcTimestamp(rotated_at)) << ",\n"
+      << "  \"rotated_by_pid\": " << ::getpid() << ",\n"
+      << "  \"store_last_modified\": " << last_modified << ",\n"
+      << "  \"counts\": " << summarizeDatabase(archived / ImageStore::kDatabaseName)
+      << ",\n"
+      << "  \"artifacts_source\": "
+      << (config.session_artifacts_dir.empty()
+              ? std::string("null")
+              : jsonString(config.session_artifacts_dir.string()))
+      << ",\n"
+      << "  \"artifacts_dir\": "
+      << (artifacts_dest.empty() ? std::string("null")
+                                 : jsonString(artifacts_dest.filename().string()))
+      << ",\n"
+      << "  \"artifacts\": " << jsonStrings(copied) << ",\n"
+      << "  \"artifacts_missing\": " << jsonStrings(missing) << ",\n"
+      << "  \"artifacts_failed\": " << jsonStrings(failed) << "\n"
+      << "}\n";
+
+  LOG(WARNING) << "[ImageStore] " << path
+               << " held the store of an earlier session (node and track ids restart "
+                  "with every session): moved it to "
+               << archived << " and copied " << copied.size() << " file(s) of "
+               << (config.session_artifacts_dir.empty() ? fs::path("<none>")
+                                                        : config.session_artifacts_dir)
+               << "; this session starts with an empty store";
+  return true;
+}
+
+//! Apply Config::on_existing; returns false if the store must not be opened
+bool prepareStore(const ImageStore::Config& config) {
+  if (!isNonEmptyDirectory(config.path)) {
+    return true;
+  }
+
+  switch (config.on_existing) {
+    case ImageStore::OnExisting::Append:
+      LOG(WARNING) << "[ImageStore] " << config.path
+                   << " holds the store of an earlier session and on_existing is "
+                      "'append': node and track ids of this session can collide with "
+                      "its anchors, track bindings and node aliases";
+      return true;
+    case ImageStore::OnExisting::Fail:
+      LOG(ERROR) << "[ImageStore] " << config.path
+                 << " holds the store of an earlier session and on_existing is 'fail'; "
+                    "not opening it";
+      return false;
+    case ImageStore::OnExisting::Rotate:
+    default:
+      try {
+        return rotateStore(config);
+      } catch (const std::exception& e) {
+        LOG(ERROR) << "[ImageStore] Failed to move the earlier session out of "
+                   << config.path << ": " << e.what() << "; not opening it";
+        return false;
+      }
+  }
 }
 
 }  // namespace
@@ -808,6 +1059,15 @@ ImageStore::Ptr ImageStore::open(const Config& config) {
   if (!config::isValid(normalized, true)) {
     LOG(ERROR) << "[ImageStore] Invalid config for " << key;
     return nullptr;
+  }
+
+  // ids restart with every session: handle a store left by an earlier process once
+  if (!reg.prepared.count(key)) {
+    if (!prepareStore(normalized)) {
+      return nullptr;
+    }
+
+    reg.prepared.insert(key);
   }
 
   try {

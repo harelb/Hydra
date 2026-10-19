@@ -90,9 +90,41 @@ class ImageStore {
   //! Name of the database file in the store directory
   static constexpr char kDatabaseName[] = "store.sqlite";
 
+  //! What the first open() of a directory in a process does with a store that already
+  //! holds files (see Config::on_existing)
+  enum class OnExisting { Rotate, Append, Fail };
+
   struct Config {
     //! Directory of the store (created if missing)
     std::filesystem::path path;
+    /**
+     * Handling of a non-empty store directory at its first open() in this process.
+     * Scene graph node ids and track ids restart with every Hydra session, so the
+     * anchors, track bindings and node aliases of an earlier session would collide
+     * with the new ones.
+     * - Rotate (default): move the directory to <parent>/sessions/<k>/<store name>
+     *   (k = 1, 2, ... is one more than the largest existing session), copy
+     *   session_artifacts next to it and write <parent>/sessions/<k>/session.json.
+     *   The new session starts with an empty store at the configured path.
+     * - Append: keep writing into the store (logs a warning; ids may collide).
+     * - Fail: refuse to open the store (open() returns nullptr).
+     */
+    OnExisting on_existing = OnExisting::Rotate;
+    //! Output directory of the earlier session (Hydra's log_path). On rotation, the
+    //! files session_artifacts (relative to it) are copied to
+    //! <parent>/sessions/<k>/<directory name>/ so the rotated store's node ids remain
+    //! resolvable. Empty: nothing is copied.
+    std::filesystem::path session_artifacts_dir;
+    //! Files copied from session_artifacts_dir on rotation (missing ones are skipped)
+    std::vector<std::string> session_artifacts = {"backend/dsg.json",
+                                                  "backend/dsg_with_mesh.json",
+                                                  "backend/mesh.ply",
+                                                  "backend/deformation_graph.dgrf",
+                                                  "backend/trajectory.csv",
+                                                  "backend/loop_closures.csv",
+                                                  "frontend/dsg.json",
+                                                  "frontend/dsg_with_mesh.json",
+                                                  "frontend/mesh.ply"};
     //! Number of observations per object track that keep their images
     size_t max_images_per_object = 1;
     //! Quality [0, 100] of the JPEG color images
@@ -155,6 +187,10 @@ class ImageStore {
    * Returns the instance already open for the same directory if there is one (its
    * configuration is kept). Returns nullptr (and logs the error) if the store cannot be
    * opened, e.g., if the database has a different schema version.
+   *
+   * The first open of a directory in a process applies Config::on_existing to a
+   * non-empty directory (exactly once: later opens, also after every instance was
+   * released, find the store of this process's session).
    */
   static Ptr open(const Config& config);
 
