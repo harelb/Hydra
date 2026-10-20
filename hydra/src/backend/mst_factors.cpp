@@ -38,8 +38,10 @@
 #include <config_utilities/factory.h>
 #include <config_utilities/validation.h>
 #include <glog/logging.h>
+#include <kimera_pgmo/deformation_graph.h>
 #include <pose_graph_tools/pose_graph.h>
 #include <spark_dsg/node_attributes.h>
+#include <spark_dsg/scene_graph.h>
 
 #include "hydra/common/global_info.h"
 #include "hydra/utils/minimum_spanning_tree.h"
@@ -75,7 +77,7 @@ void MstPlaceFactors::updateProblem(uint64_t timestamp_ns,
                                     kimera_pgmo::DeformationGraph& deformation_graph,
                                     const NodeRobotMap* robot_lookup) const {
   const auto& places = graph.getLayer(DsgLayers::PLACES);
-  if (places.nodes().empty()) {
+  if (places.numNodes() == 0) {
     LOG(WARNING) << "Attempting to add places to deformation graph without places";
     return;
   }

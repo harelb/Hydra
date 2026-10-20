@@ -34,6 +34,7 @@
  * -------------------------------------------------------------------------- */
 #pragma once
 #include <spark_dsg/bounding_box.h>
+#include <spark_dsg/layer_view.h>
 
 #include <optional>
 

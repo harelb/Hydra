@@ -33,13 +33,15 @@
  * purposes notwithstanding any copyright notation herein.
  * -------------------------------------------------------------------------- */
 #pragma once
-#include <spark_dsg/scene_graph.h>
+#include <spark_dsg/scene_graph_types.h>
+#include <spark_dsg/spark_dsg_fwd.h>
 
 #include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace hydra {
