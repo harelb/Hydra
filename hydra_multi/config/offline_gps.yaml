@@ -26,6 +26,7 @@ backend:
       type: UpdateAgentsFunctor
     objects:
       type: UpdateObjectsFunctor
+      merge_exclusion_metadata_key: awcd_change  # objects changed between sessions never merge
     surface_places:
       type: Update2dPlacesFunctor
     places:

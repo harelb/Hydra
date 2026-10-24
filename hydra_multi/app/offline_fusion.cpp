@@ -17,6 +17,7 @@
 
 #include <CLI/CLI.hpp>
 #include <filesystem>
+#include <fstream>
 #include <nlohmann/json.hpp>
 
 namespace hydra_multi {
@@ -197,6 +198,14 @@ ProblemInfo::ProblemInfo(const Args& args)
     hydra_multi::FileDsgInput::Config dsg;
     dsg.dsg_json = dirpath / "frontend/dsg_with_mesh.json";
     dsg.force_robot_id = true;
+    // optional session label and per-node metadata (e.g. change annotations)
+    if (fs::exists(dirpath / "session.txt")) {
+      std::ifstream fin(dirpath / "session.txt");
+      std::getline(fin, dsg.session);
+    }
+    if (fs::exists(dirpath / "node_metadata.json")) {
+      dsg.node_metadata_path = dirpath / "node_metadata.json";
+    }
     robot_config.inputs.emplace_back("dsg", dsg);
 
     hydra_multi::FileDGraphInput::Config dgraph;

@@ -9,6 +9,9 @@
 #include <spark_dsg/node_attributes.h>
 #include <spark_dsg/printing.h>
 
+#include <fstream>
+#include <nlohmann/json.hpp>
+
 namespace hydra_multi {
 
 using config::Path;
@@ -89,8 +92,13 @@ void declare_config(FileDsgInput::Config& config) {
   name("FileDsgInput::Config");
   field<Path>(config.dsg_json, "dsg_json");
   field(config.force_robot_id, "force_robot_id");
+  field(config.session, "session");
+  field<Path>(config.node_metadata_path, "node_metadata_path");
 
   check<Path::Exists>(config.dsg_json, "dsg_json");
+  if (!config.node_metadata_path.empty()) {
+    check<Path::Exists>(config.node_metadata_path, "node_metadata_path");
+  }
 }
 
 FileDsgInput::FileDsgInput(const Config& config,
@@ -98,6 +106,39 @@ FileDsgInput::FileDsgInput(const Config& config,
                            std::string name,
                            size_t id)
     : Input(state, name, id), config(config) {}
+
+void FileDsgInput::annotateNodes(SceneGraph& graph) const {
+  if (!config.session.empty()) {
+    const nlohmann::json session{{"session", config.session}};
+    for (const auto& layer : graph.all_layers()) {
+      for (const auto& node : layer.nodes()) {
+        node.attributes().metadata.add(session);
+      }
+    }
+  }
+
+  if (config.node_metadata_path.empty()) {
+    return;
+  }
+
+  std::ifstream fin(config.node_metadata_path);
+  const auto annotations = nlohmann::json::parse(fin);
+  size_t num_annotated = 0;
+  for (const auto& [key, metadata] : annotations.items()) {
+    const auto node = graph.findNode(std::stoull(key));
+    if (!node) {
+      LOG(WARNING) << "[" << name_ << "] annotated node " << NodeSymbol(std::stoull(key)).str()
+                   << " is not in " << config.dsg_json;
+      continue;
+    }
+
+    node->attributes().metadata.add(metadata);
+    ++num_annotated;
+  }
+
+  LOG(INFO) << "[" << name_ << "] annotated " << num_annotated << " / " << annotations.size()
+            << " nodes from " << config.node_metadata_path;
+}
 
 void FileDsgInput::init() {
   std::lock_guard<std::mutex> state_lock(state_->mutex);
@@ -113,6 +154,7 @@ void FileDsgInput::init() {
     }
   }
 
+  annotateNodes(*state_->dsg_);
   if (config.force_robot_id) {
     rewireRobotId(id_, *state_->dsg_);
   }
