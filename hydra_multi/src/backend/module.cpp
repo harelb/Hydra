@@ -142,6 +142,8 @@ void declare_config(MultiBackendModule::GpsConfig& config) {
   field(config.align_yaw_only, "align_yaw_only");
   field(config.gravity_sigma, "gravity_sigma");
   field(config.min_alignment_loop_closures, "min_alignment_loop_closures");
+  field(config.loop_closure_gate_m, "loop_closure_gate_m");
+  field(config.coarse_gate_m, "coarse_gate_m");
 
   checkCondition(config.origin_utm.empty() || config.origin_utm.size() == 3,
                  "origin_utm must be empty or have 3 entries");
@@ -605,12 +607,17 @@ void MultiBackendModule::addLoopClosures() {
 }
 
 void MultiBackendModule::optimizeStartup() {
-  addLoopClosures();
-  if (config.gps.enable) {
-    alignRobotsWithLoopClosures();
-  } else {
+  if (!config.gps.enable) {
+    addLoopClosures();
     initialAlignment();
+    return;
   }
+
+  // align robots without GPS and drop loop closures that contradict the GPS frame before
+  // they reach the factor graph
+  alignRobotsWithLoopClosures();
+  gateLoopClosures();
+  addLoopClosures();
 }
 
 void MultiBackendModule::optimizeCleanup(const gtsam::Values& results) {
@@ -982,89 +989,198 @@ void MultiBackendModule::alignRobotsWithLoopClosures() {
     return;
   }
 
-  // candidate corrections world_T_world' for each robot without a GPS frame, from loop
-  // closures (dest = src * src_T_dest) to robots with one
-  const auto values = deformation_graph_->getValuesCopy();
-  std::map<RobotId, std::vector<gtsam::Pose3>> candidates;
-  for (const auto& lc : loop_closures_) {
-    const auto& prefixes = kimera_pgmo::robot_prefix_to_id;
-    if (!prefixes.count(lc.src.chr()) || !prefixes.count(lc.dest.chr()) ||
-        !values.exists(lc.src) || !values.exists(lc.dest)) {
-      continue;
-    }
+  // For each loop closure between a robot without a GPS frame and one with it: the pose
+  // the unaligned node should have (from the aligned side and the loop closure) and its
+  // current pose. Each one proposes a correction world_T_world' = target * current^-1.
+  struct Constraint {
+    gtsam::Pose3 target;
+    gtsam::Pose3 current;
+  };
 
-    const RobotId src_robot = prefixes.at(lc.src.chr());
-    const RobotId dest_robot = prefixes.at(lc.dest.chr());
-    const bool src_aligned = gps_aligned_robots_.count(src_robot);
-    const bool dest_aligned = gps_aligned_robots_.count(dest_robot);
-    if (src_aligned == dest_aligned) {
-      continue;
-    }
+  // Coarse GPS fixes (too noisy for priors) of each robot paired with the antenna position
+  // in the current world frame; they reject alignments that are grossly wrong (e.g. a
+  // self-consistent set of false loop closures from repetitive structure)
+  std::map<RobotId, std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>>> coarse;
+  if (config.gps.coarse_gate_m > 0.0 && gps_origin_utm_) {
+    const auto max_gap_ns = static_cast<Timestamp>(config.gps.max_time_diff_s * 1e9);
+    for (const auto& [robot_id, state] : *shared_states_) {
+      std::lock_guard<std::mutex> state_lock(state->mutex);
+      if (gps_aligned_robots_.count(robot_id) || state->gps_coarse_measurements.empty() ||
+          !state->pose_graph_) {
+        continue;
+      }
 
-    const auto world_T_src = values.at<gtsam::Pose3>(lc.src);
-    const auto world_T_dest = values.at<gtsam::Pose3>(lc.dest);
-    if (src_aligned) {
-      candidates[dest_robot].push_back(world_T_src * lc.src_T_dest * world_T_dest.inverse());
-    } else {
-      candidates[src_robot].push_back(world_T_dest * lc.src_T_dest.inverse() *
-                                      world_T_src.inverse());
+      const auto nodes = sortedNodes(*state->pose_graph_);
+      const auto world_T_robot = curr_W_T_robot_.count(robot_id)
+                                     ? curr_W_T_robot_.at(robot_id)
+                                     : gtsam::Pose3();
+      for (const auto& meas : state->gps_coarse_measurements) {
+        const auto result = interpolatePose(nodes, meas.stamp_ns, max_gap_ns);
+        if (!result) {
+          continue;
+        }
+
+        const auto antenna = world_T_robot.transformFrom(
+            result->second.transformFrom(state->body_t_gps));
+        coarse[robot_id].emplace_back(antenna, meas.utm - *gps_origin_utm_);
+      }
     }
   }
 
-  for (const auto& [robot_id, corrections] : candidates) {
-    if (corrections.size() < min_lcs) {
-      continue;
+  const auto coarse_error = [&](RobotId robot_id, const gtsam::Pose3& correction) {
+    const auto iter = coarse.find(robot_id);
+    if (iter == coarse.end() || iter->second.size() < config.gps.min_alignment_fixes) {
+      return -1.0;
     }
 
-    // consensus: the correction most other corrections agree with
-    size_t best_idx = 0;
+    std::vector<double> errors;
+    for (const auto& [antenna, fix] : iter->second) {
+      errors.push_back((correction.transformFrom(antenna) - fix).head<2>().norm());
+    }
+
+    std::nth_element(errors.begin(), errors.begin() + errors.size() / 2, errors.end());
+    return errors[errors.size() / 2];
+  };
+
+  // align the best supported robot first, so robots only connected through other
+  // unaligned robots can follow
+  while (true) {
+    const auto values = deformation_graph_->getValuesCopy();
+    std::map<RobotId, std::vector<Constraint>> constraints;
+    for (const auto& lc : loop_closures_) {
+      const auto& prefixes = kimera_pgmo::robot_prefix_to_id;
+      if (!prefixes.count(lc.src.chr()) || !prefixes.count(lc.dest.chr()) ||
+          !values.exists(lc.src) || !values.exists(lc.dest)) {
+        continue;
+      }
+
+      const RobotId src_robot = prefixes.at(lc.src.chr());
+      const RobotId dest_robot = prefixes.at(lc.dest.chr());
+      const bool src_aligned = gps_aligned_robots_.count(src_robot);
+      const bool dest_aligned = gps_aligned_robots_.count(dest_robot);
+      if (src_aligned == dest_aligned) {
+        continue;
+      }
+
+      const auto world_T_src = values.at<gtsam::Pose3>(lc.src);
+      const auto world_T_dest = values.at<gtsam::Pose3>(lc.dest);
+      if (src_aligned) {
+        constraints[dest_robot].push_back({world_T_src * lc.src_T_dest, world_T_dest});
+      } else {
+        constraints[src_robot].push_back(
+            {world_T_dest * lc.src_T_dest.inverse(), world_T_src});
+      }
+    }
+
+    // consensus per robot: the correction that brings the most loop closures within
+    // tolerance (residuals are evaluated locally at each loop closure, so the lever arm
+    // to the world origin does not inflate rotation differences)
+    std::optional<RobotId> best_robot;
+    gtsam::Pose3 best_correction;
     size_t best_inliers = 0;
-    for (size_t i = 0; i < corrections.size(); ++i) {
-      size_t inliers = 0;
-      for (const auto& other : corrections) {
-        const auto diff = corrections[i].between(other);
-        if (diff.translation().norm() < config.gps.alignment_inlier_threshold_m &&
-            gtsam::Rot3::Logmap(diff.rotation()).norm() < 0.2) {
-          ++inliers;
+    size_t best_total = 0;
+    for (const auto& [robot_id, robot_constraints] : constraints) {
+      for (const auto& candidate : robot_constraints) {
+        const auto correction = candidate.target * candidate.current.inverse();
+        size_t inliers = 0;
+        for (const auto& c : robot_constraints) {
+          const auto residual = c.target.between(correction * c.current);
+          if (residual.translation().norm() < config.gps.alignment_inlier_threshold_m &&
+              gtsam::Rot3::Logmap(residual.rotation()).norm() < 0.2) {
+            ++inliers;
+          }
         }
-      }
 
-      if (inliers > best_inliers) {
+        if (inliers <= best_inliers) {
+          continue;
+        }
+
+        const auto gps_error = coarse_error(robot_id, correction);
+        if (gps_error > config.gps.coarse_gate_m) {
+          continue;
+        }
+
+        best_robot = robot_id;
+        best_correction = correction;
         best_inliers = inliers;
-        best_idx = i;
+        best_total = robot_constraints.size();
       }
     }
 
-    if (best_inliers < min_lcs) {
-      LOG(WARNING) << "Robot " << robot_id << ": only " << best_inliers << " / "
-                   << corrections.size() << " loop closures agree; not aligning";
-      continue;
+    if (!best_robot || best_inliers < min_lcs) {
+      if (best_robot) {
+        LOG(WARNING) << "Robot " << *best_robot << ": only " << best_inliers << " / "
+                     << best_total << " loop closures agree; not aligning";
+      }
+      return;
     }
 
-    const auto& correction = corrections[best_idx];
+    const auto robot_id = *best_robot;
     const auto agent_prefix = kimera_pgmo::robot_id_to_prefix.at(robot_id);
     const auto vertex_prefix = kimera_pgmo::robot_id_to_vertex_prefix.at(robot_id);
     gtsam::Values aligned;
     for (const auto& key : values.keys()) {
       const gtsam::Symbol symbol(key);
       if (symbol.chr() == agent_prefix || symbol.chr() == vertex_prefix) {
-        aligned.insert(key, correction * values.at<gtsam::Pose3>(key));
+        aligned.insert(key, best_correction * values.at<gtsam::Pose3>(key));
       }
     }
 
     deformation_graph_->updateValues(aligned);
-    curr_W_T_robot_[robot_id] = correction * curr_W_T_robot_[robot_id];
+    curr_W_T_robot_[robot_id] = best_correction * curr_W_T_robot_[robot_id];
     gps_aligned_robots_.insert(robot_id);
     // the scene graph and mesh are re-transformed by the state frame on the next update
     const auto state = shared_states_->find(robot_id);
     if (state != shared_states_->end()) {
       std::lock_guard<std::mutex> state_lock(state->second->mutex);
-      state->second->world_T_robot = correction * state->second->world_T_robot;
+      state->second->world_T_robot = best_correction * state->second->world_T_robot;
     }
+
+    const auto gps_error = coarse_error(robot_id, best_correction);
     LOG(INFO) << "Aligned robot " << robot_id << " to the GPS frame with " << best_inliers
-              << " / " << corrections.size() << " loop closures (correction: "
-              << correction.translation().norm() << " m, "
-              << gtsam::Rot3::Logmap(correction.rotation()).norm() << " rad)";
+              << " / " << best_total << " loop closures"
+              << (gps_error >= 0.0 ? " (coarse GPS median error " + std::to_string(gps_error) + " m)"
+                                   : std::string())
+              << " (correction: "
+              << best_correction.translation().norm() << " m, "
+              << gtsam::Rot3::Logmap(best_correction.rotation()).norm() << " rad)";
+  }
+}
+
+void MultiBackendModule::gateLoopClosures() {
+  const auto gate = config.gps.loop_closure_gate_m;
+  if (gate <= 0.0) {
+    return;
+  }
+
+  const auto values = deformation_graph_->getValuesCopy();
+  const auto& prefixes = kimera_pgmo::robot_prefix_to_id;
+  size_t num_rejected = 0;
+  auto iter = loop_closures_.begin();
+  while (iter != loop_closures_.end()) {
+    const auto& lc = *iter;
+    if (lc.added_to_dgraph || lc.src.chr() == lc.dest.chr() || !prefixes.count(lc.src.chr()) ||
+        !prefixes.count(lc.dest.chr()) || !values.exists(lc.src) || !values.exists(lc.dest) ||
+        !gps_aligned_robots_.count(prefixes.at(lc.src.chr())) ||
+        !gps_aligned_robots_.count(prefixes.at(lc.dest.chr()))) {
+      ++iter;
+      continue;
+    }
+
+    const auto predicted = values.at<gtsam::Pose3>(lc.src) * lc.src_T_dest;
+    const auto residual = predicted.between(values.at<gtsam::Pose3>(lc.dest));
+    if (residual.translation().norm() > gate) {
+      iter = loop_closures_.erase(iter);
+      ++num_rejected;
+      continue;
+    }
+
+    ++iter;
+  }
+
+  if (num_rejected) {
+    LOG(INFO) << "Rejected " << num_rejected << " inter-robot loop closures that disagree "
+              << "with the GPS frame by more than " << gate << " m";
   }
 }
 

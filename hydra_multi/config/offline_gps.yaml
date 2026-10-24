@@ -19,6 +19,8 @@ backend:
     align_yaw_only: true
     gravity_sigma: 0.02
     min_alignment_loop_closures: 3
+    loop_closure_gate_m: 5.0
+    coarse_gate_m: 20.0
   add_places_to_deformation_graph: false
   optimize_on_lc: true
   enable_node_merging: true

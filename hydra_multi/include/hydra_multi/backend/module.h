@@ -94,6 +94,12 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
     //! Robots without a GPS alignment are initialized from at least this many loop
     //! closures to robots that have one (0 disables)
     size_t min_alignment_loop_closures = 3;
+    //! Inter-robot loop closures between robots in the GPS frame that disagree with the
+    //! aligned initial guess by more than this are discarded (non-positive disables)
+    double loop_closure_gate_m = 5.0;
+    //! A loop-closure alignment is rejected when the median horizontal distance to the
+    //! robot's coarse GPS fixes exceeds this (non-positive disables)
+    double coarse_gate_m = 20.0;
   };
 
   struct Config : hydra::DsgUpdater::Config {
@@ -186,6 +192,8 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
   size_t addGpsPriors(RobotId robot_id, const UnitInterfaceState& state);
 
   void alignRobotsWithLoopClosures();
+
+  void gateLoopClosures();
 
  protected:
   std::unique_ptr<std::thread> spin_thread_;

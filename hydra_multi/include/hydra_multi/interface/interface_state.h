@@ -34,6 +34,8 @@ struct UnitInterfaceState {
   gtsam::Pose3 world_T_robot = gtsam::Pose3(Eigen::MatrixXd::Identity(4, 4));
   //! GPS fixes (UTM) for the robot and the antenna position in the body frame
   GpsMeasurements gps_measurements;
+  //! Fixes too uncertain for priors, only used to validate alignments
+  GpsMeasurements gps_coarse_measurements;
   Eigen::Vector3d body_t_gps = Eigen::Vector3d::Zero();
   int gps_utm_zone = 0;
 

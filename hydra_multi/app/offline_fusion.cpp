@@ -143,6 +143,7 @@ struct ProblemInfo {
     fs::path output;
     std::vector<double> gps_lever{0.0, 0.0, 0.0};
     double gps_max_sigma_m = 2.0;
+    double gps_coarse_max_sigma_m = 15.0;
 
     void add_to_app(CLI::App& app);
   };
@@ -173,6 +174,8 @@ void ProblemInfo::Args::add_to_app(CLI::App& app) {
       ->description("GPS antenna position in the body frame (used with <input>/gps.csv)");
   app.add_option("--gps-max-sigma", gps_max_sigma_m)
       ->description("Discard GPS fixes with a larger horizontal standard deviation");
+  app.add_option("--gps-coarse-max-sigma", gps_coarse_max_sigma_m)
+      ->description("Keep noisier fixes up to this standard deviation to validate alignments");
 }
 
 ProblemInfo::ProblemInfo(const Args& args)
@@ -220,6 +223,7 @@ ProblemInfo::ProblemInfo(const Args& args)
       gps.gps_path = gps_path;
       gps.body_t_gps = args.gps_lever;
       gps.max_sigma_m = args.gps_max_sigma_m;
+      gps.coarse_max_sigma_m = args.gps_coarse_max_sigma_m;
       robot_config.inputs.emplace_back("gps", gps);
     }
 

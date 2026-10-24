@@ -18,6 +18,9 @@ class FileGpsInput : public Input {
     int min_status = 0;
     //! Discard fixes whose horizontal standard deviation exceeds this
     double max_sigma_m = 2.0;
+    //! Fixes up to this horizontal standard deviation are kept as coarse fixes that only
+    //! validate alignments (non-positive disables)
+    double coarse_max_sigma_m = 15.0;
   } const config;
 
   FileGpsInput(const Config& config,

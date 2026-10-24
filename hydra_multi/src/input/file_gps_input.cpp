@@ -33,6 +33,7 @@ void declare_config(FileGpsInput::Config& config) {
   field(config.utm_zone, "utm_zone");
   field(config.min_status, "min_status");
   field(config.max_sigma_m, "max_sigma_m");
+  field(config.coarse_max_sigma_m, "coarse_max_sigma_m");
 
   check<Path::Exists>(config.gps_path, "gps_path");
   checkCondition(config.body_t_gps.size() == 3, "body_t_gps must have 3 entries");
@@ -66,23 +67,27 @@ void FileGpsInput::init() {
   const double max_variance = config.max_sigma_m * config.max_sigma_m;
 
   std::lock_guard<std::mutex> lock(state_->mutex);
+  const double coarse_variance = config.coarse_max_sigma_m * config.coarse_max_sigma_m;
   state_->gps_measurements.clear();
+  state_->gps_coarse_measurements.clear();
   for (const auto& meas : measurements) {
     if (meas.status < config.min_status) {
       continue;
     }
 
-    if (std::max(meas.variance.x(), meas.variance.y()) > max_variance) {
-      continue;
+    const double variance = std::max(meas.variance.x(), meas.variance.y());
+    if (variance <= max_variance) {
+      state_->gps_measurements.push_back(meas);
+    } else if (config.coarse_max_sigma_m > 0.0 && variance <= coarse_variance) {
+      state_->gps_coarse_measurements.push_back(meas);
     }
-
-    state_->gps_measurements.push_back(meas);
   }
 
   state_->body_t_gps << config.body_t_gps[0], config.body_t_gps[1], config.body_t_gps[2];
   state_->gps_utm_zone = zone;
   LOG(INFO) << "[" << name_ << "] kept " << state_->gps_measurements.size() << " / "
-            << measurements.size() << " GPS fixes from " << config.gps_path;
+            << measurements.size() << " GPS fixes (+ "
+            << state_->gps_coarse_measurements.size() << " coarse) from " << config.gps_path;
 }
 
 void FileGpsInput::stop() {}
