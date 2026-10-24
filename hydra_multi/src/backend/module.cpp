@@ -140,6 +140,7 @@ void declare_config(MultiBackendModule::GpsConfig& config) {
   field(config.min_alignment_fixes, "min_alignment_fixes");
   field(config.alignment_inlier_threshold_m, "alignment_inlier_threshold_m");
   field(config.align_yaw_only, "align_yaw_only");
+  field(config.gravity_sigma, "gravity_sigma");
 
   checkCondition(config.origin_utm.empty() || config.origin_utm.size() == 3,
                  "origin_utm must be empty or have 3 entries");
@@ -472,7 +473,9 @@ void MultiBackendModule::partialOptimization(const Timestamp& timestamp_ns) {
   }
 
   if (has_all_keys) {
-    LOG(WARNING) << "No work to do in partial optimization!";
+    // every node already has an optimized value (the graph was rebuilt from the states)
+    VLOG(1) << "No work to do in partial optimization!";
+    deformation_graph_->updateValues(optimized);
     return;
   }
 
@@ -954,6 +957,17 @@ size_t MultiBackendModule::addGpsPriors(RobotId robot_id,
 
   const auto num_added = deformation_graph_->processPositionMeasurements(measurements);
   VLOG(1) << "Added " << num_added << " GPS priors for robot " << robot_id;
+  if (num_added && gps.gravity_sigma > 0.0) {
+    std::vector<std::pair<gtsam::Key, gtsam::Point3>> body_ups;
+    for (const auto& node : nodes) {
+      const gtsam::Rot3 robot_R_node(node.pose.linear());
+      body_ups.emplace_back(gtsam::Symbol(prefix, node.key),
+                            robot_R_node.unrotate(gtsam::Point3::UnitZ()));
+    }
+
+    deformation_graph_->processUpVectorPriors(body_ups, gps.gravity_sigma);
+  }
+
   return num_added;
 }
 

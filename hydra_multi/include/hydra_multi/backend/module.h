@@ -87,6 +87,10 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
     double alignment_inlier_threshold_m = 3.0;
     //! Only estimate yaw and translation in the initial alignment
     bool align_yaw_only = true;
+    //! Standard deviation of a gravity (roll / pitch) prior on every pose of a robot with
+    //! GPS priors, assuming gravity-aligned odometry (non-positive disables). Without it,
+    //! position priors with an unconstrained altitude leave the trajectory free to tilt
+    double gravity_sigma = 0.02;
   };
 
   struct Config : hydra::DsgUpdater::Config {

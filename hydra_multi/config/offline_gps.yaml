@@ -1,0 +1,74 @@
+---
+# Offline fusion anchored to GPS: every robot is aligned to the GPS (UTM / ENU) frame and
+# gets position priors on its agent poses, so no robot is anchored at the origin and the
+# loop-closure initial alignment (which re-anchors robots to a reference robot) is off.
+# Inputs need <input>/gps.csv (timestamp_ns,latitude,longitude,altitude,status,cov_xx,cov_yy,cov_zz).
+backend:
+  type: MultiBackendModule
+  anchor_robot_id: -1
+  gps:
+    enable: true
+    min_sigma_m: 0.1
+    sigma_scale: 1.0
+    use_altitude: false
+    altitude_sigma_m: 100.0
+    max_time_diff_s: 1.0
+    known_inlier_max_sigma_m: -1.0
+    min_alignment_fixes: 10
+    alignment_inlier_threshold_m: 3.0
+    align_yaw_only: true
+    gravity_sigma: 0.02
+  add_places_to_deformation_graph: false
+  optimize_on_lc: true
+  enable_node_merging: true
+  update_functors:
+    agents:
+      type: UpdateAgentsFunctor
+    objects:
+      type: UpdateObjectsFunctor
+    surface_places:
+      type: Update2dPlacesFunctor
+    places:
+      type: UpdatePlacesFunctor
+    rooms:
+      type: UpdateRoomsFunctor
+      room_finder:
+        min_dilation_m: 0.5
+        max_dilation_m: 1.2
+        min_component_size: 10
+        min_room_size: 10
+        dilation_threshold_mode: PLATEAU
+        min_lifetime_length_m: 0.1
+        plateau_ratio: 0.15
+        clustering_mode: NEIGHBORS
+        dilation_diff_threshold_m: -1.0
+    buildings:
+      type: UpdateBuildingsFunctor
+    zmq_labels:
+      type: ZmqRoomLabelUpdater
+  pgmo:
+    run_mode: FULL  # kimera_pgmo run mode FULL is required
+    embed_trajectory_delta_t: 5.0
+    num_interp_pts: 3
+    interp_horizon: 10.0
+    enable_sparsify: false
+    trans_node_dist: 1.0
+    rot_node_dist: 1.2
+    optimizer:
+      type: KimeraRpgoOptimizer
+      solver: LM
+      gnc:
+        inlier_probability: 0.9
+        mu_step: 1.6
+        max_iterations: 100
+    covariance:
+      odom: 1.0e-02
+      loop_close: 5.0e-02
+      sg_loop_close: 1.0e-01
+      prior: 1.0e-02
+      mesh_mesh: 1.0e-02
+      pose_mesh: 1.0e-02
+      place_mesh: 1.0e-02
+      place_edge: 10.0
+      place_merge: 10.0
+      object_merge: 10.0
