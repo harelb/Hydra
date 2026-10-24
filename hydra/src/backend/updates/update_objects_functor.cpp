@@ -39,6 +39,8 @@
 #include <glog/logging.h>
 #include <spark_dsg/printing.h>
 
+#include <nlohmann/json.hpp>
+
 #include "hydra/backend/backend_utilities.h"
 #include "hydra/utils/mesh_utilities.h"
 #include "hydra/utils/timing_utilities.h"
@@ -103,6 +105,7 @@ void declare_config(UpdateObjectsFunctor::Config& config) {
   field(config.allow_connection_merging, "allow_connection_merging");
   field(config.merge_proposer, "merge_proposer");
   field(config.deformation_interpolator, "deformation_interpolator");
+  field(config.merge_exclusion_metadata_key, "merge_exclusion_metadata_key");
 }
 
 UpdateObjectsFunctor::UpdateObjectsFunctor(const Config& config)
@@ -198,10 +201,16 @@ MergeList UpdateObjectsFunctor::findMerges(const SceneGraph& graph,
   merge_proposer.findMerges(
       objects,
       view,
-      [](const SceneGraphNode& lhs, const SceneGraphNode& rhs) {
+      [&exclusion_key = config.merge_exclusion_metadata_key](const SceneGraphNode& lhs,
+                                                            const SceneGraphNode& rhs) {
         const auto lhs_attrs = lhs.tryAttributes<ObjectNodeAttributes>();
         const auto rhs_attrs = rhs.tryAttributes<ObjectNodeAttributes>();
         if (!lhs_attrs || !rhs_attrs) {
+          return false;
+        }
+
+        if (!exclusion_key.empty() && (lhs_attrs->metadata().contains(exclusion_key) ||
+                                       rhs_attrs->metadata().contains(exclusion_key))) {
           return false;
         }
 

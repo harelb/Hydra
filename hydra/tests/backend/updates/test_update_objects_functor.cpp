@@ -33,6 +33,8 @@
  * purposes notwithstanding any copyright notation herein.
  * -------------------------------------------------------------------------- */
 #include <gtest/gtest.h>
+
+#include <nlohmann/json.hpp>
 #include <hydra/backend/updates/update_objects_functor.h>
 #include <spark_dsg/node_attributes.h>
 #include <spark_dsg/node_symbol.h>
@@ -160,6 +162,49 @@ TEST(UpdateObjectsFunctor, ObjectUpdateMergeLC) {
 
   MergeList expected{{1, 0}};
   EXPECT_EQ(result_merges, expected);
+}
+
+TEST(UpdateObjectsFunctor, MergeExclusionMetadata) {
+  // same setup as ObjectUpdateMergeLC, but one object is flagged as changed
+  for (const bool flagged : {false, true}) {
+    auto dsg = test::makeSharedDsg();
+    auto& graph = *dsg->graph;
+
+    auto attrs0 = std::make_unique<ObjectNodeAttributes>();
+    attrs0->position << 1.0, 2.0, 3.0;
+    attrs0->bounding_box.type = BoundingBox::Type::AABB;
+    attrs0->bounding_box.world_P_center << 1.0f, 2.0f, 3.0f;
+    attrs0->semantic_label = 1u;
+    attrs0->is_active = false;
+    attrs0->mesh_connections = {0, 1};
+    if (flagged) {
+      attrs0->metadata.add(nlohmann::json{{"awcd_change", {{"type", "removed"}}}});
+    }
+    graph.emplaceNode(DsgLayers::OBJECTS, 0, std::move(attrs0));
+
+    auto attrs1 = std::make_unique<ObjectNodeAttributes>();
+    attrs1->position << 2.0, 3.0, 4.0;
+    attrs1->bounding_box.type = BoundingBox::Type::AABB;
+    attrs1->bounding_box.world_P_center << 2.0f, 3.0f, 4.0f;
+    attrs1->semantic_label = 1u;
+    attrs1->is_active = true;
+    attrs1->mesh_connections = {0, 1};
+    graph.emplaceNode(DsgLayers::OBJECTS, 1, std::move(attrs1));
+
+    auto mesh = std::make_shared<Mesh>();
+    mesh->resizeVertices(2);
+    mesh->setPos(0, Mesh::Pos(-1.0, -2.0, -3.0));
+    mesh->setPos(1, Mesh::Pos(1.0, 2.0, 3.0));
+    graph.setMesh(mesh);
+
+    UpdateInfo::ConstPtr info(new UpdateInfo{0, nullptr, nullptr, true, {}});
+    UpdateObjectsFunctor::Config config;
+    config.merge_exclusion_metadata_key = "awcd_change";
+    UpdateObjectsFunctor functor(config);
+    const auto result_merges = callWithUnmerged(functor, *dsg, info, true);
+    const MergeList expected = flagged ? MergeList() : MergeList{{1, 0}};
+    EXPECT_EQ(result_merges, expected) << "flagged: " << flagged;
+  }
 }
 
 TEST(UpdateObjectsFunctor, ObjectUpdateMergeNoLC) {

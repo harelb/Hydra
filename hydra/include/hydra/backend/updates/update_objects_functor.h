@@ -59,6 +59,9 @@ struct UpdateObjectsFunctor : public UpdateFunctor {
     //! Settings for deforming object orientations (and objects without mesh
     //! connections) via the deformation graph
     DeformationInterpolator::Config deformation_interpolator = {};
+    //! Objects whose metadata contains this key are never merged (empty disables), e.g.
+    //! objects flagged as changed between mapping sessions
+    std::string merge_exclusion_metadata_key = "";
   } const config;
 
   explicit UpdateObjectsFunctor(const Config& config);
