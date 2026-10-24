@@ -141,6 +141,7 @@ void declare_config(MultiBackendModule::GpsConfig& config) {
   field(config.alignment_inlier_threshold_m, "alignment_inlier_threshold_m");
   field(config.align_yaw_only, "align_yaw_only");
   field(config.gravity_sigma, "gravity_sigma");
+  field(config.min_alignment_loop_closures, "min_alignment_loop_closures");
 
   checkCondition(config.origin_utm.empty() || config.origin_utm.size() == 3,
                  "origin_utm must be empty or have 3 entries");
@@ -605,7 +606,11 @@ void MultiBackendModule::addLoopClosures() {
 
 void MultiBackendModule::optimizeStartup() {
   addLoopClosures();
-  initialAlignment();
+  if (config.gps.enable) {
+    alignRobotsWithLoopClosures();
+  } else {
+    initialAlignment();
+  }
 }
 
 void MultiBackendModule::optimizeCleanup(const gtsam::Values& results) {
@@ -969,6 +974,98 @@ size_t MultiBackendModule::addGpsPriors(RobotId robot_id,
   }
 
   return num_added;
+}
+
+void MultiBackendModule::alignRobotsWithLoopClosures() {
+  const auto min_lcs = config.gps.min_alignment_loop_closures;
+  if (!min_lcs || gps_aligned_robots_.empty()) {
+    return;
+  }
+
+  // candidate corrections world_T_world' for each robot without a GPS frame, from loop
+  // closures (dest = src * src_T_dest) to robots with one
+  const auto values = deformation_graph_->getValuesCopy();
+  std::map<RobotId, std::vector<gtsam::Pose3>> candidates;
+  for (const auto& lc : loop_closures_) {
+    const auto& prefixes = kimera_pgmo::robot_prefix_to_id;
+    if (!prefixes.count(lc.src.chr()) || !prefixes.count(lc.dest.chr()) ||
+        !values.exists(lc.src) || !values.exists(lc.dest)) {
+      continue;
+    }
+
+    const RobotId src_robot = prefixes.at(lc.src.chr());
+    const RobotId dest_robot = prefixes.at(lc.dest.chr());
+    const bool src_aligned = gps_aligned_robots_.count(src_robot);
+    const bool dest_aligned = gps_aligned_robots_.count(dest_robot);
+    if (src_aligned == dest_aligned) {
+      continue;
+    }
+
+    const auto world_T_src = values.at<gtsam::Pose3>(lc.src);
+    const auto world_T_dest = values.at<gtsam::Pose3>(lc.dest);
+    if (src_aligned) {
+      candidates[dest_robot].push_back(world_T_src * lc.src_T_dest * world_T_dest.inverse());
+    } else {
+      candidates[src_robot].push_back(world_T_dest * lc.src_T_dest.inverse() *
+                                      world_T_src.inverse());
+    }
+  }
+
+  for (const auto& [robot_id, corrections] : candidates) {
+    if (corrections.size() < min_lcs) {
+      continue;
+    }
+
+    // consensus: the correction most other corrections agree with
+    size_t best_idx = 0;
+    size_t best_inliers = 0;
+    for (size_t i = 0; i < corrections.size(); ++i) {
+      size_t inliers = 0;
+      for (const auto& other : corrections) {
+        const auto diff = corrections[i].between(other);
+        if (diff.translation().norm() < config.gps.alignment_inlier_threshold_m &&
+            gtsam::Rot3::Logmap(diff.rotation()).norm() < 0.2) {
+          ++inliers;
+        }
+      }
+
+      if (inliers > best_inliers) {
+        best_inliers = inliers;
+        best_idx = i;
+      }
+    }
+
+    if (best_inliers < min_lcs) {
+      LOG(WARNING) << "Robot " << robot_id << ": only " << best_inliers << " / "
+                   << corrections.size() << " loop closures agree; not aligning";
+      continue;
+    }
+
+    const auto& correction = corrections[best_idx];
+    const auto agent_prefix = kimera_pgmo::robot_id_to_prefix.at(robot_id);
+    const auto vertex_prefix = kimera_pgmo::robot_id_to_vertex_prefix.at(robot_id);
+    gtsam::Values aligned;
+    for (const auto& key : values.keys()) {
+      const gtsam::Symbol symbol(key);
+      if (symbol.chr() == agent_prefix || symbol.chr() == vertex_prefix) {
+        aligned.insert(key, correction * values.at<gtsam::Pose3>(key));
+      }
+    }
+
+    deformation_graph_->updateValues(aligned);
+    curr_W_T_robot_[robot_id] = correction * curr_W_T_robot_[robot_id];
+    gps_aligned_robots_.insert(robot_id);
+    // the scene graph and mesh are re-transformed by the state frame on the next update
+    const auto state = shared_states_->find(robot_id);
+    if (state != shared_states_->end()) {
+      std::lock_guard<std::mutex> state_lock(state->second->mutex);
+      state->second->world_T_robot = correction * state->second->world_T_robot;
+    }
+    LOG(INFO) << "Aligned robot " << robot_id << " to the GPS frame with " << best_inliers
+              << " / " << corrections.size() << " loop closures (correction: "
+              << correction.translation().norm() << " m, "
+              << gtsam::Rot3::Logmap(correction.rotation()).norm() << " rad)";
+  }
 }
 
 void MultiBackendModule::logStatus() {

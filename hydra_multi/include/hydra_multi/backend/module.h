@@ -91,6 +91,9 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
     //! GPS priors, assuming gravity-aligned odometry (non-positive disables). Without it,
     //! position priors with an unconstrained altitude leave the trajectory free to tilt
     double gravity_sigma = 0.02;
+    //! Robots without a GPS alignment are initialized from at least this many loop
+    //! closures to robots that have one (0 disables)
+    size_t min_alignment_loop_closures = 3;
   };
 
   struct Config : hydra::DsgUpdater::Config {
@@ -181,6 +184,8 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
   void alignRobotToGps(RobotId robot_id, UnitInterfaceState& state);
 
   size_t addGpsPriors(RobotId robot_id, const UnitInterfaceState& state);
+
+  void alignRobotsWithLoopClosures();
 
  protected:
   std::unique_ptr<std::thread> spin_thread_;

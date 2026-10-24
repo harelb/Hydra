@@ -18,6 +18,7 @@ backend:
     alignment_inlier_threshold_m: 3.0
     align_yaw_only: true
     gravity_sigma: 0.02
+    min_alignment_loop_closures: 3
   add_places_to_deformation_graph: false
   optimize_on_lc: true
   enable_node_merging: true
