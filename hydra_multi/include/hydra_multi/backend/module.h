@@ -11,6 +11,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <thread>
 #include <unordered_map>
 
@@ -59,6 +61,34 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
                                  const MultiBackendModuleStatus&>;
   using NodeToRobotMap = std::unordered_map<spark_dsg::NodeId, size_t>;
 
+  //! Absolute position (GPS) priors on the agent pose graphs
+  struct GpsConfig {
+    //! Add GPS priors and align each robot to the GPS world frame
+    bool enable = false;
+    //! UTM coordinate (easting, northing, altitude) of the world frame origin. Empty
+    //! uses the first fix of the lowest robot id
+    std::vector<double> origin_utm;
+    //! Lower bound on the standard deviation of each fix
+    double min_sigma_m = 0.1;
+    //! Scale applied to the reported standard deviation of each fix
+    double sigma_scale = 1.0;
+    //! Constrain altitude (GPS altitude is usually much worse than position)
+    bool use_altitude = false;
+    //! Standard deviation applied to altitude when use_altitude is false
+    double altitude_sigma_m = 100.0;
+    //! Maximum time between a fix and the closest agent pose
+    double max_time_diff_s = 1.0;
+    //! Fixes with horizontal standard deviation below this are known inliers for GNC
+    //! (negative disables)
+    double known_inlier_max_sigma_m = -1.0;
+    //! Minimum number of fixes required to align a robot to the GPS frame
+    size_t min_alignment_fixes = 10;
+    //! Inlier threshold for the initial alignment
+    double alignment_inlier_threshold_m = 3.0;
+    //! Only estimate yaw and translation in the initial alignment
+    bool align_yaw_only = true;
+  };
+
   struct Config : hydra::DsgUpdater::Config {
     //! Actually perform PGO on every detected loop closure
     bool optimize_on_lc = true;
@@ -79,6 +109,8 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
     //! Partial optimizer
     config::VirtualConfig<kimera_pgmo::Optimizer> partial_optimizer{
         kimera_pgmo::KimeraRpgoOptimizer::Config()};
+    //! GPS priors
+    GpsConfig gps;
   } const config;
 
   MultiBackendModule(const Config& config,
@@ -105,6 +137,9 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
   bool spinOnce(Timestamp timestamp_ns);
 
   bool optimizeOnce(Timestamp timestamp_ns);
+
+  //! Whether the last update added any GPS priors
+  bool hasGpsPriors() const { return num_gps_priors_ > 0; }
 
  protected:
   void spin();
@@ -138,6 +173,10 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
   void rebaseStates(size_t timestamps_ns);
 
   void logStatus();
+
+  void alignRobotToGps(RobotId robot_id, UnitInterfaceState& state);
+
+  size_t addGpsPriors(RobotId robot_id, const UnitInterfaceState& state);
 
  protected:
   std::unique_ptr<std::thread> spin_thread_;
@@ -175,8 +214,13 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
 
   InitialAlignModule::Ptr initial_align_;
   hydra::DsgUpdater::Ptr dsg_updater_;
+  std::optional<Eigen::Vector3d> gps_origin_utm_;
+  std::set<RobotId> gps_aligned_robots_;
+  size_t num_gps_priors_ = 0;
   kimera_pgmo::Optimizer::Ptr partial_pgo_;
 };
+
+void declare_config(MultiBackendModule::GpsConfig& config);
 
 void declare_config(MultiBackendModule::Config& config);
 

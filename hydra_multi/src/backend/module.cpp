@@ -15,6 +15,9 @@
 #include <spark_dsg/node_attributes.h>
 #include <spark_dsg/node_symbol.h>
 
+#include <algorithm>
+#include <fstream>
+#include <iomanip>
 #include <ranges>
 
 #include "hydra_multi/backend/loop_closure_initial_align.h"
@@ -123,6 +126,30 @@ std::ostream& operator<<(std::ostream& os, const MultiBackendModuleStatus& statu
 
 void MultiBackendModuleStatus::reset() { *this = MultiBackendModuleStatus(); }
 
+void declare_config(MultiBackendModule::GpsConfig& config) {
+  using namespace config;
+  name("MultiBackendModule::GpsConfig");
+  field(config.enable, "enable");
+  field(config.origin_utm, "origin_utm");
+  field(config.min_sigma_m, "min_sigma_m");
+  field(config.sigma_scale, "sigma_scale");
+  field(config.use_altitude, "use_altitude");
+  field(config.altitude_sigma_m, "altitude_sigma_m");
+  field(config.max_time_diff_s, "max_time_diff_s");
+  field(config.known_inlier_max_sigma_m, "known_inlier_max_sigma_m");
+  field(config.min_alignment_fixes, "min_alignment_fixes");
+  field(config.alignment_inlier_threshold_m, "alignment_inlier_threshold_m");
+  field(config.align_yaw_only, "align_yaw_only");
+
+  checkCondition(config.origin_utm.empty() || config.origin_utm.size() == 3,
+                 "origin_utm must be empty or have 3 entries");
+  check(config.min_sigma_m, GT, 0.0, "min_sigma_m");
+  check(config.sigma_scale, GT, 0.0, "sigma_scale");
+  check(config.altitude_sigma_m, GT, 0.0, "altitude_sigma_m");
+  check(config.max_time_diff_s, GT, 0.0, "max_time_diff_s");
+  check(config.alignment_inlier_threshold_m, GT, 0.0, "alignment_inlier_threshold_m");
+}
+
 void declare_config(MultiBackendModule::Config& config) {
   using namespace config;
   base<DsgUpdater::Config>(config);
@@ -137,6 +164,7 @@ void declare_config(MultiBackendModule::Config& config) {
   field(config.initial_align, "initial_align");
   config.partial_optimizer.setOptional();
   field(config.partial_optimizer, "partial_optimizer");
+  field(config.gps, "gps");
 }
 
 MultiBackendModule::MultiBackendModule(
@@ -165,6 +193,23 @@ MultiBackendModule::MultiBackendModule(
   status_log_.push_back(status_);
   if (!config.include_mesh_factors) {
     LOG(WARNING) << "Mesh factors are OFF! Mesh will not be updated!";
+  }
+
+  if (config.gps.enable) {
+    if (config.gps.origin_utm.size() == 3) {
+      gps_origin_utm_ = Eigen::Vector3d(
+          config.gps.origin_utm[0], config.gps.origin_utm[1], config.gps.origin_utm[2]);
+    }
+
+    if (config.anchor_robot_id >= 0) {
+      LOG(WARNING) << "GPS priors are enabled but robot " << config.anchor_robot_id
+                   << " is anchored at the origin! Set anchor_robot_id to -1";
+    }
+
+    if (initial_align_) {
+      LOG(WARNING) << "GPS priors are enabled with a loop-closure initial alignment, "
+                      "which re-anchors robots to the reference robot frame";
+    }
   }
 }
 
@@ -197,6 +242,46 @@ void MultiBackendModule::save(const DataDirectory& output) {
   if (mesh && !mesh->empty()) {
     // mesh implements vertex and face traits
     kimera_pgmo::WriteMesh(backend_path / "mesh.ply", *mesh, *mesh);
+  }
+
+  // node id bookkeeping so per-robot data keyed by node id (e.g. image stores) can be
+  // re-keyed into the fused graph: robot -> [original id, fused id], fused merges
+  {
+    std::ofstream map_file(backend_path / "fusion_node_map.json");
+    map_file << "{\"robots\": {";
+    bool first_robot = true;
+    for (const auto& [robot_id, node_map] : unmerged_dsg_->robot_node_map) {
+      map_file << (first_robot ? "" : ", ") << "\"" << robot_id << "\": [";
+      first_robot = false;
+      std::map<NodeId, NodeId> sorted(node_map.begin(), node_map.end());
+      bool first = true;
+      for (const auto& [original, fused] : sorted) {
+        map_file << (first ? "" : ", ") << "[" << original << ", " << fused << "]";
+        first = false;
+      }
+      map_file << "]";
+    }
+
+    map_file << "}, \"merges\": [";
+    bool first = true;
+    for (const auto& [child, parent] : merged_dsg_->merges) {
+      map_file << (first ? "" : ", ") << "[" << child << ", " << parent << "]";
+      first = false;
+    }
+    map_file << "]}\n";
+  }
+
+  if (gps_origin_utm_) {
+    int zone = 0;
+    for (const auto& [id, state] : *shared_states_) {
+      zone = zone ? zone : state->gps_utm_zone;
+    }
+
+    std::ofstream origin_file(backend_path / "gps_origin_utm.yaml");
+    origin_file << std::setprecision(12) << "utm_zone: " << zone << "\n"
+                << "easting: " << gps_origin_utm_->x() << "\n"
+                << "northing: " << gps_origin_utm_->y() << "\n"
+                << "altitude: " << gps_origin_utm_->z() << "\n";
   }
 
   writeBackendStatus(status_log_, pgmo_path / "dsg_pgmo_status.csv");
@@ -244,7 +329,8 @@ void MultiBackendModule::addLoopClosures(const pose_graph_tools::PoseGraph& info
 }
 
 bool MultiBackendModule::optimizeOnce(Timestamp stamp) {
-  if (processLoopClosures(stamp)) {
+  const bool new_loop_closures = processLoopClosures(stamp);
+  if (new_loop_closures || num_gps_priors_ > 0) {
     optimize(stamp);
   }
 
@@ -603,6 +689,7 @@ bool MultiBackendModule::updateFromStates(Timestamp timestamp_ns) {
 
   // Accumulate factor graphs from each robot into one
   deformation_graph_->clear();
+  num_gps_priors_ = 0;
 
   // Reset loop closure flags since the deformation graph was cleared
   // They will be re-added by addLoopClosures() at the end of updateFromStates
@@ -613,6 +700,9 @@ bool MultiBackendModule::updateFromStates(Timestamp timestamp_ns) {
   for (const auto& [id, state] : *shared_states_) {
     VLOG(3) << "Saw robot " << id << " in update @ " << timestamp_ns << " [ns]";
     std::lock_guard<std::mutex> state_lock(state->mutex);
+    if (config.gps.enable) {
+      alignRobotToGps(id, *state);
+    }
 
     // Append transform
     Eigen::Isometry3d transform(state->world_T_robot.matrix());
@@ -639,6 +729,10 @@ bool MultiBackendModule::updateFromStates(Timestamp timestamp_ns) {
                                        gtsam::Pose3(),
                                        true,
                                        config.pgmo.prior_variance);
+      }
+
+      if (config.gps.enable) {
+        num_gps_priors_ += addGpsPriors(id, *state);
       }
     }
 
@@ -686,7 +780,7 @@ void MultiBackendModule::combineAndDeformMesh(Timestamp timestamp_ns,
       continue;
     }
 
-    if (have_loopclosures_ || force_mesh_update) {
+    if (have_loopclosures_ || num_gps_priors_ > 0 || force_mesh_update) {
       VLOG(3) << "Deforming mesh for robot " << id;
       // TODO(Yun): cannot use pre archived vertices as 'start_hint'
       // Note that here the mesh in the state is actually getting modified!
@@ -751,6 +845,116 @@ void MultiBackendModule::initialAlignment() {
   const auto initial_values = initial_align_->computeInitialGuess(
       info, pgmo_values, merged_dsg_->node_robot_map);
   deformation_graph_->updateValues(initial_values);
+}
+
+namespace {
+
+std::vector<pose_graph_tools::PoseGraphNode> sortedNodes(
+    const pose_graph_tools::PoseGraph& pose_graph) {
+  auto nodes = pose_graph.nodes;
+  std::sort(nodes.begin(), nodes.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.stamp_ns < rhs.stamp_ns;
+  });
+  return nodes;
+}
+
+}  // namespace
+
+void MultiBackendModule::alignRobotToGps(RobotId robot_id, UnitInterfaceState& state) {
+  if (gps_aligned_robots_.count(robot_id) || state.gps_measurements.empty() ||
+      !state.pose_graph_ || state.pose_graph_->nodes.empty()) {
+    return;
+  }
+
+  if (!gps_origin_utm_) {
+    gps_origin_utm_ = state.gps_measurements.front().utm;
+    LOG(INFO) << "GPS origin set to first fix of robot " << robot_id << ": "
+              << std::setprecision(12) << gps_origin_utm_->transpose();
+  }
+
+  const auto nodes = sortedNodes(*state.pose_graph_);
+  const auto max_gap_ns = static_cast<Timestamp>(config.gps.max_time_diff_s * 1e9);
+  std::vector<Eigen::Vector3d> robot_points;
+  std::vector<Eigen::Vector3d> world_points;
+  for (const auto& meas : state.gps_measurements) {
+    const auto result = interpolatePose(nodes, meas.stamp_ns, max_gap_ns);
+    if (!result) {
+      continue;
+    }
+
+    robot_points.push_back(result->second.transformFrom(state.body_t_gps));
+    world_points.push_back(meas.utm - *gps_origin_utm_);
+  }
+
+  if (robot_points.size() < config.gps.min_alignment_fixes) {
+    LOG(WARNING) << "Robot " << robot_id << " only has " << robot_points.size()
+                 << " GPS fixes overlapping its trajectory; not aligning to GPS";
+    return;
+  }
+
+  const auto alignment = alignPoints(robot_points,
+                                     world_points,
+                                     config.gps.alignment_inlier_threshold_m,
+                                     200,
+                                     config.gps.align_yaw_only);
+  if (!alignment) {
+    LOG(WARNING) << "Failed to align robot " << robot_id << " to GPS";
+    return;
+  }
+
+  LOG(INFO) << "Aligned robot " << robot_id << " to GPS with "
+            << alignment->num_inliers << " / " << robot_points.size()
+            << " inliers (rmse: " << alignment->rmse << " m)";
+  state.world_T_robot = alignment->world_T_robot;
+  gps_aligned_robots_.insert(robot_id);
+}
+
+size_t MultiBackendModule::addGpsPriors(RobotId robot_id,
+                                        const UnitInterfaceState& state) {
+  if (!gps_origin_utm_ || state.gps_measurements.empty() || !state.pose_graph_) {
+    return 0;
+  }
+
+  const auto& gps = config.gps;
+  const auto prefix = kimera_pgmo::GetRobotPrefix(robot_id);
+  const auto nodes = sortedNodes(*state.pose_graph_);
+  const auto max_gap_ns = static_cast<Timestamp>(gps.max_time_diff_s * 1e9);
+  kimera_pgmo::DeformationGraph::PositionMeasurements measurements;
+  for (const auto& meas : state.gps_measurements) {
+    const auto result = interpolatePose(nodes, meas.stamp_ns, max_gap_ns);
+    if (!result) {
+      continue;
+    }
+
+    // express the antenna at the fix time relative to the closest pose node
+    const auto& node = nodes[result->first];
+    const gtsam::Pose3 robot_T_node(node.pose.matrix());
+    const auto node_T_fix = robot_T_node.between(result->second);
+
+    const Eigen::Vector3d sigma = meas.variance.cwiseMax(0.0).cwiseSqrt();
+    const double horizontal_sigma = std::max(sigma.x(), sigma.y());
+    Eigen::Vector3d variance;
+    for (int i = 0; i < 3; ++i) {
+      const double s = std::max(sigma(i) * gps.sigma_scale, gps.min_sigma_m);
+      variance(i) = s * s;
+    }
+
+    if (!gps.use_altitude) {
+      variance.z() = gps.altitude_sigma_m * gps.altitude_sigma_m;
+    }
+
+    auto& prior = measurements.emplace_back();
+    prior.key = gtsam::Symbol(prefix, node.key);
+    prior.world_t_sensor = meas.utm - *gps_origin_utm_;
+    prior.covariance = variance.asDiagonal();
+    prior.body_t_sensor = node_T_fix.transformFrom(state.body_t_gps);
+    prior.known_inlier =
+        gps.known_inlier_max_sigma_m > 0.0 && horizontal_sigma <= gps.known_inlier_max_sigma_m;
+  }
+
+  const auto num_added = deformation_graph_->processPositionMeasurements(measurements);
+  VLOG(1) << "Added " << num_added << " GPS priors for robot " << robot_id;
+  return num_added;
 }
 
 void MultiBackendModule::logStatus() {

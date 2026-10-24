@@ -4,5 +4,6 @@ target_sources(
           ${CMAKE_CURRENT_SOURCE_DIR}/multi_global_info.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/multi_dsg_info.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/utils.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/gps.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/multi_pipeline.cpp
 )

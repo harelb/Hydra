@@ -12,6 +12,7 @@
 #include <hydra_multi/common/multi_pipeline.h>
 #include <hydra_multi/input/file_dgraph_input.h>
 #include <hydra_multi/input/file_dsg_input.h>
+#include <hydra_multi/input/file_gps_input.h>
 #include <spark_dsg/serialization/json_conversions.h>
 
 #include <CLI/CLI.hpp>
@@ -139,6 +140,8 @@ struct ProblemInfo {
     std::vector<fs::path> inputs;
     fs::path lcd_path;
     fs::path output;
+    std::vector<double> gps_lever{0.0, 0.0, 0.0};
+    double gps_max_sigma_m = 2.0;
 
     void add_to_app(CLI::App& app);
   };
@@ -164,6 +167,11 @@ void ProblemInfo::Args::add_to_app(CLI::App& app) {
       ->check(CLI::ExistingFile)
       ->description("Input loop closures");
   app.add_option("-o,--output", output)->description("Output path");
+  app.add_option("--gps-lever", gps_lever)
+      ->expected(3)
+      ->description("GPS antenna position in the body frame (used with <input>/gps.csv)");
+  app.add_option("--gps-max-sigma", gps_max_sigma_m)
+      ->description("Discard GPS fixes with a larger horizontal standard deviation");
 }
 
 ProblemInfo::ProblemInfo(const Args& args)
@@ -196,6 +204,16 @@ ProblemInfo::ProblemInfo(const Args& args)
     dgraph.include_priors = false;
     robot_config.inputs.emplace_back("dgrf", dgraph);
 
+    const auto gps_path = dirpath / "gps.csv";
+    if (fs::exists(gps_path)) {
+      LOG(INFO) << "Using GPS fixes from " << gps_path;
+      hydra_multi::FileGpsInput::Config gps;
+      gps.gps_path = gps_path;
+      gps.body_t_gps = args.gps_lever;
+      gps.max_sigma_m = args.gps_max_sigma_m;
+      robot_config.inputs.emplace_back("gps", gps);
+    }
+
     robots.push_back(config::VirtualConfig<UnitInterface>(robot_config));
   }
 
@@ -218,11 +236,14 @@ class MultiOfflinePipeline : public MultiPipeline {
 
   void fuse(const PoseGraph& loop_closures = {}) {
     backend_->spinOnce(0);
-    if (loop_closures.empty()) {
+    if (loop_closures.empty() && !backend_->hasGpsPriors()) {
       return;
     }
 
-    backend_->addLoopClosures(loop_closures);
+    if (!loop_closures.empty()) {
+      backend_->addLoopClosures(loop_closures);
+    }
+
     backend_->optimizeOnce(0);
     backend_->spinOnce(0);
   }

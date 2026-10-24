@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 
+#include "hydra_multi/common/gps.h"
 #include "hydra_multi/common/types.h"
 #include "hydra_multi/operators/deformation_graph_operator.h"
 #include "hydra_multi/operators/mesh_operator.h"
@@ -31,6 +32,10 @@ struct UnitInterfaceState {
   MeshData::Ptr mesh_data_;
   spark_dsg::SceneGraph::Ptr dsg_;
   gtsam::Pose3 world_T_robot = gtsam::Pose3(Eigen::MatrixXd::Identity(4, 4));
+  //! GPS fixes (UTM) for the robot and the antenna position in the body frame
+  GpsMeasurements gps_measurements;
+  Eigen::Vector3d body_t_gps = Eigen::Vector3d::Zero();
+  int gps_utm_zone = 0;
 
   // Operators
   DeformationGraphOperator::Ptr mesh_graph_operator_;
