@@ -36,6 +36,9 @@ struct UnitInterfaceState {
   GpsMeasurements gps_measurements;
   //! Fixes too uncertain for priors, only used to validate alignments
   GpsMeasurements gps_coarse_measurements;
+  //! Fixes with no usable horizontal position but a trusted altitude (e.g. a known ground
+  //! height on a flat site); they become altitude priors and never align the robot
+  GpsMeasurements gps_altitude_measurements;
   Eigen::Vector3d body_t_gps = Eigen::Vector3d::Zero();
   int gps_utm_zone = 0;
 

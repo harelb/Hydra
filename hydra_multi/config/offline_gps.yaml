@@ -30,8 +30,9 @@ backend:
     objects:
       type: UpdateObjectsFunctor
       merge_exclusion_metadata_key: awcd_change  # objects changed between sessions never merge
-    surface_places:
-      type: Update2dPlacesFunctor
+    surface_places:  # ADT4 runs put region-growing traversability places in MESH_PLACES (as their backend)
+      type: UpdateRegionGrowingTraversabilityFunctor
+      layer: MESH_PLACES
     places:
       type: UpdatePlacesFunctor
     rooms:

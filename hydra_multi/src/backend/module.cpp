@@ -143,6 +143,7 @@ void declare_config(MultiBackendModule::GpsConfig& config) {
   field(config.gravity_sigma, "gravity_sigma");
   field(config.min_alignment_loop_closures, "min_alignment_loop_closures");
   field(config.loop_closure_gate_m, "loop_closure_gate_m");
+  field(config.gate_horizontal_only, "gate_horizontal_only");
   field(config.coarse_gate_m, "coarse_gate_m");
 
   checkCondition(config.origin_utm.empty() || config.origin_utm.size() == 3,
@@ -926,7 +927,8 @@ void MultiBackendModule::alignRobotToGps(RobotId robot_id, UnitInterfaceState& s
 
 size_t MultiBackendModule::addGpsPriors(RobotId robot_id,
                                         const UnitInterfaceState& state) {
-  if (!gps_origin_utm_ || state.gps_measurements.empty() || !state.pose_graph_) {
+  if (!gps_origin_utm_ || !state.pose_graph_ ||
+      (state.gps_measurements.empty() && state.gps_altitude_measurements.empty())) {
     return 0;
   }
 
@@ -935,7 +937,12 @@ size_t MultiBackendModule::addGpsPriors(RobotId robot_id,
   const auto nodes = sortedNodes(*state.pose_graph_);
   const auto max_gap_ns = static_cast<Timestamp>(gps.max_time_diff_s * 1e9);
   kimera_pgmo::DeformationGraph::PositionMeasurements measurements;
-  for (const auto& meas : state.gps_measurements) {
+  // altitude-only fixes carry their (huge) horizontal covariance, so they only constrain z
+  auto all_measurements = state.gps_measurements;
+  all_measurements.insert(all_measurements.end(),
+                          state.gps_altitude_measurements.begin(),
+                          state.gps_altitude_measurements.end());
+  for (const auto& meas : all_measurements) {
     const auto result = interpolatePose(nodes, meas.stamp_ns, max_gap_ns);
     if (!result) {
       continue;
@@ -1085,7 +1092,13 @@ void MultiBackendModule::alignRobotsWithLoopClosures() {
         size_t inliers = 0;
         for (const auto& c : robot_constraints) {
           const auto residual = c.target.between(correction * c.current);
-          if (residual.translation().norm() < config.gps.alignment_inlier_threshold_m &&
+          const double distance =
+              config.gps.gate_horizontal_only
+                  ? ((correction * c.current).translation() - c.target.translation())
+                        .head<2>()
+                        .norm()
+                  : residual.translation().norm();
+          if (distance < config.gps.alignment_inlier_threshold_m &&
               gtsam::Rot3::Logmap(residual.rotation()).norm() < 0.2) {
             ++inliers;
           }
@@ -1168,8 +1181,12 @@ void MultiBackendModule::gateLoopClosures() {
     }
 
     const auto predicted = values.at<gtsam::Pose3>(lc.src) * lc.src_T_dest;
-    const auto residual = predicted.between(values.at<gtsam::Pose3>(lc.dest));
-    if (residual.translation().norm() > gate) {
+    const auto& world_T_dest = values.at<gtsam::Pose3>(lc.dest);
+    const double distance =
+        config.gps.gate_horizontal_only
+            ? (world_T_dest.translation() - predicted.translation()).head<2>().norm()
+            : predicted.between(world_T_dest).translation().norm();
+    if (distance > gate) {
       iter = loop_closures_.erase(iter);
       ++num_rejected;
       continue;

@@ -21,6 +21,9 @@ class FileGpsInput : public Input {
     //! Fixes up to this horizontal standard deviation are kept as coarse fixes that only
     //! validate alignments (non-positive disables)
     double coarse_max_sigma_m = 15.0;
+    //! Fixes too uncertain horizontally for either set are kept as altitude-only priors
+    //! when their altitude standard deviation is at most this (non-positive disables)
+    double altitude_max_sigma_m = 0.0;
   } const config;
 
   FileGpsInput(const Config& config,

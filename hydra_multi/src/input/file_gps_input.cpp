@@ -34,6 +34,7 @@ void declare_config(FileGpsInput::Config& config) {
   field(config.min_status, "min_status");
   field(config.max_sigma_m, "max_sigma_m");
   field(config.coarse_max_sigma_m, "coarse_max_sigma_m");
+  field(config.altitude_max_sigma_m, "altitude_max_sigma_m");
 
   check<Path::Exists>(config.gps_path, "gps_path");
   checkCondition(config.body_t_gps.size() == 3, "body_t_gps must have 3 entries");
@@ -70,6 +71,8 @@ void FileGpsInput::init() {
   const double coarse_variance = config.coarse_max_sigma_m * config.coarse_max_sigma_m;
   state_->gps_measurements.clear();
   state_->gps_coarse_measurements.clear();
+  state_->gps_altitude_measurements.clear();
+  const double altitude_variance = config.altitude_max_sigma_m * config.altitude_max_sigma_m;
   for (const auto& meas : measurements) {
     if (meas.status < config.min_status) {
       continue;
@@ -80,6 +83,8 @@ void FileGpsInput::init() {
       state_->gps_measurements.push_back(meas);
     } else if (config.coarse_max_sigma_m > 0.0 && variance <= coarse_variance) {
       state_->gps_coarse_measurements.push_back(meas);
+    } else if (config.altitude_max_sigma_m > 0.0 && meas.variance.z() <= altitude_variance) {
+      state_->gps_altitude_measurements.push_back(meas);
     }
   }
 
@@ -87,7 +92,9 @@ void FileGpsInput::init() {
   state_->gps_utm_zone = zone;
   LOG(INFO) << "[" << name_ << "] kept " << state_->gps_measurements.size() << " / "
             << measurements.size() << " GPS fixes (+ "
-            << state_->gps_coarse_measurements.size() << " coarse) from " << config.gps_path;
+            << state_->gps_coarse_measurements.size() << " coarse, "
+            << state_->gps_altitude_measurements.size() << " altitude-only) from "
+            << config.gps_path;
 }
 
 void FileGpsInput::stop() {}

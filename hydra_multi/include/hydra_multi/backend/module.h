@@ -97,6 +97,9 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
     //! Inter-robot loop closures between robots in the GPS frame that disagree with the
     //! aligned initial guess by more than this are discarded (non-positive disables)
     double loop_closure_gate_m = 5.0;
+    //! Measure the loop-closure gate and the loop-closure alignment consensus horizontally
+    //! (world xy) only, so odometric height drift of unanchored robots does not count
+    bool gate_horizontal_only = false;
     //! A loop-closure alignment is rejected when the median horizontal distance to the
     //! robot's coarse GPS fixes exceeds this (non-positive disables)
     double coarse_gate_m = 20.0;

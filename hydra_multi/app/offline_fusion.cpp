@@ -144,6 +144,7 @@ struct ProblemInfo {
     std::vector<double> gps_lever{0.0, 0.0, 0.0};
     double gps_max_sigma_m = 2.0;
     double gps_coarse_max_sigma_m = 15.0;
+    double gps_altitude_max_sigma_m = 0.0;
 
     void add_to_app(CLI::App& app);
   };
@@ -176,6 +177,9 @@ void ProblemInfo::Args::add_to_app(CLI::App& app) {
       ->description("Discard GPS fixes with a larger horizontal standard deviation");
   app.add_option("--gps-coarse-max-sigma", gps_coarse_max_sigma_m)
       ->description("Keep noisier fixes up to this standard deviation to validate alignments");
+  app.add_option("--gps-altitude-max-sigma", gps_altitude_max_sigma_m)
+      ->description("Use fixes too noisy horizontally as altitude-only priors when their "
+                    "altitude standard deviation is at most this (0 disables)");
 }
 
 ProblemInfo::ProblemInfo(const Args& args)
@@ -224,6 +228,7 @@ ProblemInfo::ProblemInfo(const Args& args)
       gps.body_t_gps = args.gps_lever;
       gps.max_sigma_m = args.gps_max_sigma_m;
       gps.coarse_max_sigma_m = args.gps_coarse_max_sigma_m;
+      gps.altitude_max_sigma_m = args.gps_altitude_max_sigma_m;
       robot_config.inputs.emplace_back("gps", gps);
     }
 
