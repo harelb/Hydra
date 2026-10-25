@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
+#include <numeric>
 #include <ranges>
 
 #include "hydra_multi/backend/loop_closure_initial_align.h"
@@ -163,6 +164,9 @@ void declare_config(MultiBackendModule::Config& config) {
   field(config.optimize_on_lc, "optimize_on_lc");
   field(config.anchor_robot_id, "anchor_robot_id");
   field(config.include_mesh_factors, "include_mesh_factors");
+  field(config.deform_mesh_by_first_seen_stamp, "deform_mesh_by_first_seen_stamp");
+  field(config.torn_face_stretch_ratio, "torn_face_stretch_ratio");
+  field(config.torn_face_min_edge_m, "torn_face_min_edge_m", "m");
   field(config.external_loop_closures, "external_loop_closures");
   field(config.sg_loop_closure_variance, "sg_loop_closure_variance");
   config.initial_align.setOptional();
@@ -801,11 +805,21 @@ void MultiBackendModule::combineAndDeformMesh(Timestamp timestamp_ns,
       // TODO(Yun): cannot use pre archived vertices as 'start_hint'
       // Note that here the mesh in the state is actually getting modified!
       char vertex_prefix = kimera_pgmo::robot_id_to_vertex_prefix.at(id);
-      deformation_graph_->deformPoints(*mesh_data->mesh,
-                                       mesh_data->original,
-                                       vertex_prefix,
-                                       KimeraPgmoInterface::config_.num_interp_pts,
-                                       KimeraPgmoInterface::config_.interp_horizon);
+      if (config.deform_mesh_by_first_seen_stamp && mesh_data->mesh->has_first_seen_stamps &&
+          deformation_graph_->hasVertexKey(vertex_prefix)) {
+        deformMeshByFirstSeen(*mesh_data, vertex_prefix);
+      } else {
+        deformation_graph_->deformPoints(*mesh_data->mesh,
+                                         mesh_data->original,
+                                         vertex_prefix,
+                                         KimeraPgmoInterface::config_.num_interp_pts,
+                                         KimeraPgmoInterface::config_.interp_horizon);
+      }
+
+      if (config.torn_face_stretch_ratio > 0.0) {
+        const auto num_dropped = dropTornFaces(*mesh_data);
+        LOG(INFO) << "Dropped " << num_dropped << " torn mesh faces for robot " << id;
+      }
     }
 
     VLOG(5) << "Copying mesh to combined mesh for robot " << id;
@@ -835,6 +849,62 @@ void MultiBackendModule::combineAndDeformMesh(Timestamp timestamp_ns,
   dsg_updater_->resetBackendDsg(timestamp_ns);
   std::lock_guard<std::mutex> merged_graph_lock(merged_dsg_->mutex);
   merged_dsg_->update(*unmerged_dsg_);
+}
+
+void MultiBackendModule::deformMeshByFirstSeen(MeshData& mesh_data, char prefix) const {
+  auto& mesh = *mesh_data.mesh;
+  hydra::StampedMeshVertices original = mesh_data.original;
+  for (size_t i = 0; i < original.size(); ++i) {
+    original[i].stamp_ns = mesh.firstSeenTimestamp(i);
+  }
+
+  std::vector<size_t> order(original.size());
+  std::iota(order.begin(), order.end(), 0);
+  std::stable_sort(order.begin(), order.end(), [&](size_t lhs, size_t rhs) {
+    return original[lhs].stamp_ns < original[rhs].stamp_ns;
+  });
+
+  kimera_pgmo::deformation::deformPoints(
+      mesh,
+      original,
+      prefix,
+      deformation_graph_->getInitialPositionsVertices(prefix),
+      deformation_graph_->getVertexStamps(prefix),
+      *deformation_graph_->getValues(),
+      KimeraPgmoInterface::config_.num_interp_pts,
+      KimeraPgmoInterface::config_.interp_horizon,
+      &order,
+      deformation_graph_->getInitialRotationsVertices(prefix));
+}
+
+size_t MultiBackendModule::dropTornFaces(MeshData& mesh_data) const {
+  auto& mesh = *mesh_data.mesh;
+  const auto& original = mesh_data.original;
+  if (original.size() != mesh.numVertices()) {
+    LOG(WARNING) << "Original vertices do not match mesh: not dropping torn faces";
+    return 0;
+  }
+
+  const double ratio_sq = config.torn_face_stretch_ratio * config.torn_face_stretch_ratio;
+  const double min_sq = config.torn_face_min_edge_m * config.torn_face_min_edge_m;
+  const auto is_torn = [&](size_t a, size_t b) {
+    const double deformed_sq = (mesh.pos(a) - mesh.pos(b)).cast<double>().squaredNorm();
+    const double original_sq = (original[a].pos - original[b].pos).cast<double>().squaredNorm();
+    return deformed_sq > min_sq && deformed_sq > ratio_sq * original_sq;
+  };
+
+  spark_dsg::Mesh::Faces kept;
+  kept.reserve(mesh.faces.size());
+  for (const auto& face : mesh.faces) {
+    if (!is_torn(face[0], face[1]) && !is_torn(face[1], face[2]) &&
+        !is_torn(face[2], face[0])) {
+      kept.push_back(face);
+    }
+  }
+
+  const size_t num_dropped = mesh.faces.size() - kept.size();
+  mesh.faces.swap(kept);
+  return num_dropped;
 }
 
 void MultiBackendModule::initialAlignment() {
