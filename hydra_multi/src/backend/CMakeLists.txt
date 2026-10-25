@@ -4,4 +4,6 @@ target_sources(
    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/loop_closure_initial_align.cpp
    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/initial_align.cpp
    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/module.cpp
+   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/place_footprint.cpp
+   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/update_multi_traversability_functor.cpp
  )

@@ -119,6 +119,10 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
     //! than torn_face_min_edge_m after deformation (non-positive ratio disables)
     double torn_face_stretch_ratio = 0.0;
     double torn_face_min_edge_m = 0.5;
+    //! Rotate the boundary radii of traversability places by the yaw of each robot's
+    //! world_T_robot when adding its graph (the radii are indexed by world-frame angle,
+    //! so without this a robot's place footprints keep its odometry-frame orientation)
+    bool rotate_place_boundaries = true;
     //! Configuration for associating external loop closures
     hydra::ExternalLoopClosureReceiver::Config external_loop_closures;
     //! Scene graph loop closure variance

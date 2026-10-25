@@ -21,6 +21,7 @@
 #include <ranges>
 
 #include "hydra_multi/backend/loop_closure_initial_align.h"
+#include "hydra_multi/backend/place_footprint.h"
 #include "hydra_multi/backend/utils.h"
 #include "hydra_multi/common/multi_global_info.h"
 
@@ -124,6 +125,32 @@ std::ostream& operator<<(std::ostream& os, const MultiBackendModuleStatus& statu
   return os;
 }
 
+namespace {
+
+//! Rotate the boundaries of all traversability places of a newly added robot graph
+//! by the yaw of its world_T_robot
+void rotatePlaceBoundaries(const spark_dsg::SceneGraph& graph,
+                           const std::unordered_map<NodeId, NodeId>& node_map,
+                           const Eigen::Isometry3d& world_T_robot) {
+  const Eigen::Matrix3d R = world_T_robot.linear();
+  const double yaw = std::atan2(R(1, 0), R(0, 0));
+  if (std::abs(yaw) < 1.0e-9) {
+    return;
+  }
+  for (const auto& [original, fused] : node_map) {
+    const auto node = graph.findNode(fused);
+    if (!node) {
+      continue;
+    }
+    auto attrs = dynamic_cast<spark_dsg::TravNodeAttributes*>(&node->attributes());
+    if (attrs) {
+      rotateBoundary(*attrs, yaw);
+    }
+  }
+}
+
+}  // namespace
+
 void MultiBackendModuleStatus::reset() { *this = MultiBackendModuleStatus(); }
 
 void declare_config(MultiBackendModule::GpsConfig& config) {
@@ -165,6 +192,7 @@ void declare_config(MultiBackendModule::Config& config) {
   field(config.include_mesh_factors, "include_mesh_factors");
   field(config.torn_face_stretch_ratio, "torn_face_stretch_ratio");
   field(config.torn_face_min_edge_m, "torn_face_min_edge_m", "m");
+  field(config.rotate_place_boundaries, "rotate_place_boundaries");
   field(config.external_loop_closures, "external_loop_closures");
   field(config.sg_loop_closure_variance, "sg_loop_closure_variance");
   config.initial_align.setOptional();
@@ -768,6 +796,10 @@ bool MultiBackendModule::updateFromStates(Timestamp timestamp_ns) {
     // TODO(nathan) this could be handled better
     updates = true;
     unmerged_dsg_->addRobotGraph(id, *state->dsg_, &transform);
+    if (config.rotate_place_boundaries) {
+      rotatePlaceBoundaries(*unmerged_dsg_->graph, unmerged_dsg_->robot_node_map.at(id),
+                            transform);
+    }
 
     if (!state->mesh_data_ || !state->mesh_data_->mesh ||
         state->mesh_data_->mesh->empty()) {
