@@ -95,7 +95,8 @@ void OpenVocabRegionsUpdateFunctor::call(const SceneGraph&,
     node.attributes().position = getRoomPosition(places, to_use);
   }
 
-  addEdgesToRoomLayer(graph, new_nodes);
+  // children live in the source layer, which may be a partition (e.g. MESH_PLACES)
+  addEdgesToRoomLayer(graph, new_nodes, graph.getLayerKey(config.source_layer));
 }
 
 }  // namespace hydra

@@ -129,7 +129,9 @@ void addEdgesToRoomLayer(const SceneGraphLayer& places,
   }
 }
 
-void addEdgesToRoomLayer(SceneGraph& graph, const std::set<NodeId>& active_rooms) {
+void addEdgesToRoomLayer(SceneGraph& graph,
+                         const std::set<NodeId>& active_rooms,
+                         const std::optional<spark_dsg::LayerKey>& child_layer) {
   for (const auto node_id : active_rooms) {
     const auto& node = graph.getNode(node_id);
     const auto room_siblings = node.siblings();
@@ -142,7 +144,7 @@ void addEdgesToRoomLayer(SceneGraph& graph, const std::set<NodeId>& active_rooms
 
     for (const auto child_id : node.children()) {
       const auto& child = graph.getNode(child_id);
-      if (child.layer.partition) {
+      if (child_layer ? child.layer != *child_layer : child.layer.partition != 0) {
         continue;  // skip searching over agent nodes
       }
 

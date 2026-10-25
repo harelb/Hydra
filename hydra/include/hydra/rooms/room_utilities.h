@@ -38,6 +38,7 @@
 
 #include <Eigen/Dense>
 #include <map>
+#include <optional>
 #include <set>
 #include <unordered_set>
 
@@ -51,7 +52,14 @@ void addEdgesToRoomLayer(const spark_dsg::SceneGraphLayer& places,
                          const std::map<size_t, spark_dsg::NodeId>& label_to_room_map,
                          spark_dsg::SceneGraphLayer& rooms);
 
+/**
+ * @brief Add edges between rooms whose children are siblings.
+ * @param child_layer Layer of the room children to search over (e.g. MESH_PLACES for
+ * open-vocabulary regions over traversability places). If unset, children outside
+ * partition 0 (agents) are skipped.
+ */
 void addEdgesToRoomLayer(spark_dsg::SceneGraph& graph,
-                         const std::set<spark_dsg::NodeId>& active_rooms);
+                         const std::set<spark_dsg::NodeId>& active_rooms,
+                         const std::optional<spark_dsg::LayerKey>& child_layer = std::nullopt);
 
 }  // namespace hydra
