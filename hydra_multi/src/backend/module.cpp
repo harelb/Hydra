@@ -18,7 +18,6 @@
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
-#include <numeric>
 #include <ranges>
 
 #include "hydra_multi/backend/loop_closure_initial_align.h"
@@ -164,7 +163,6 @@ void declare_config(MultiBackendModule::Config& config) {
   field(config.optimize_on_lc, "optimize_on_lc");
   field(config.anchor_robot_id, "anchor_robot_id");
   field(config.include_mesh_factors, "include_mesh_factors");
-  field(config.deform_mesh_by_first_seen_stamp, "deform_mesh_by_first_seen_stamp");
   field(config.torn_face_stretch_ratio, "torn_face_stretch_ratio");
   field(config.torn_face_min_edge_m, "torn_face_min_edge_m", "m");
   field(config.external_loop_closures, "external_loop_closures");
@@ -805,16 +803,11 @@ void MultiBackendModule::combineAndDeformMesh(Timestamp timestamp_ns,
       // TODO(Yun): cannot use pre archived vertices as 'start_hint'
       // Note that here the mesh in the state is actually getting modified!
       char vertex_prefix = kimera_pgmo::robot_id_to_vertex_prefix.at(id);
-      if (config.deform_mesh_by_first_seen_stamp && mesh_data->mesh->has_first_seen_stamps &&
-          deformation_graph_->hasVertexKey(vertex_prefix)) {
-        deformMeshByFirstSeen(*mesh_data, vertex_prefix);
-      } else {
-        deformation_graph_->deformPoints(*mesh_data->mesh,
-                                         mesh_data->original,
-                                         vertex_prefix,
-                                         KimeraPgmoInterface::config_.num_interp_pts,
-                                         KimeraPgmoInterface::config_.interp_horizon);
-      }
+      deformation_graph_->deformPoints(*mesh_data->mesh,
+                                       mesh_data->original,
+                                       vertex_prefix,
+                                       KimeraPgmoInterface::config_.num_interp_pts,
+                                       KimeraPgmoInterface::config_.interp_horizon);
 
       if (config.torn_face_stretch_ratio > 0.0) {
         const auto num_dropped = dropTornFaces(*mesh_data);
@@ -849,32 +842,6 @@ void MultiBackendModule::combineAndDeformMesh(Timestamp timestamp_ns,
   dsg_updater_->resetBackendDsg(timestamp_ns);
   std::lock_guard<std::mutex> merged_graph_lock(merged_dsg_->mutex);
   merged_dsg_->update(*unmerged_dsg_);
-}
-
-void MultiBackendModule::deformMeshByFirstSeen(MeshData& mesh_data, char prefix) const {
-  auto& mesh = *mesh_data.mesh;
-  hydra::StampedMeshVertices original = mesh_data.original;
-  for (size_t i = 0; i < original.size(); ++i) {
-    original[i].stamp_ns = mesh.firstSeenTimestamp(i);
-  }
-
-  std::vector<size_t> order(original.size());
-  std::iota(order.begin(), order.end(), 0);
-  std::stable_sort(order.begin(), order.end(), [&](size_t lhs, size_t rhs) {
-    return original[lhs].stamp_ns < original[rhs].stamp_ns;
-  });
-
-  kimera_pgmo::deformation::deformPoints(
-      mesh,
-      original,
-      prefix,
-      deformation_graph_->getInitialPositionsVertices(prefix),
-      deformation_graph_->getVertexStamps(prefix),
-      *deformation_graph_->getValues(),
-      KimeraPgmoInterface::config_.num_interp_pts,
-      KimeraPgmoInterface::config_.interp_horizon,
-      &order,
-      deformation_graph_->getInitialRotationsVertices(prefix));
 }
 
 size_t MultiBackendModule::dropTornFaces(MeshData& mesh_data) const {

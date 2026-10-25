@@ -114,12 +114,6 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
     int anchor_robot_id = 0;
     //! PGO versus PGMO
     bool include_mesh_factors = true;
-    //! Associate mesh vertices with control points by the vertices' first-seen stamps
-    //! (control points are stamped when first compressed) instead of their last-update
-    //! stamps, and deform them in stamp order (the control point time window slides
-    //! forward only, so out-of-order vertices otherwise use control points of a later
-    //! time)
-    bool deform_mesh_by_first_seen_stamp = false;
     //! Drop mesh faces torn by the deformation: a face is dropped when one of its edges
     //! is longer than torn_face_stretch_ratio times its undeformed length and longer
     //! than torn_face_min_edge_m after deformation (non-positive ratio disables)
@@ -180,9 +174,6 @@ class MultiBackendModule : public kimera_pgmo::KimeraPgmoInterface {
   bool updateFromStates(Timestamp timestamp_ns);
 
   void combineAndDeformMesh(Timestamp timestamp_ns, bool force_mesh_update = false);
-
-  //! Deform a robot's mesh with first-seen vertex stamps, in stamp order
-  void deformMeshByFirstSeen(MeshData& mesh_data, char prefix) const;
 
   //! Drop the faces of a deformed mesh torn by the deformation (returns number dropped)
   size_t dropTornFaces(MeshData& mesh_data) const;
