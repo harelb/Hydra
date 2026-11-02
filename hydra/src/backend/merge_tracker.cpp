@@ -42,6 +42,40 @@ using namespace spark_dsg;
 
 namespace hydra {
 
+namespace {
+
+// Checks that a merge parent is in both graphs before rebuilding its attributes.
+//
+// A parent deleted by the frontend normally disappears from both graphs in the same
+// update: the deletion reaches the unmerged graph from the frontend and the merged
+// graph through DsgUpdater::callUpdateFunctions (mergeGraph propagates removed
+// nodes). A parent present in only one graph means that something removed it from
+// one graph between that merge and this call, e.g., an update functor that removes
+// nodes from only the unmerged or only the merged graph. Upstream CHECK-failed when
+// the parent was only in the merged graph. The merged attributes can't be rebuilt
+// from a missing parent, so the merge set is dropped instead (the merges themselves
+// stay recorded in SharedDsgInfo::merges). Each merge set is dropped once, so this
+// warns at most once per parent.
+bool hasParent(const SceneGraph& unmerged, const SceneGraph& merged, NodeId parent) {
+  const bool in_unmerged = unmerged.hasNode(parent);
+  const bool in_merged = merged.hasNode(parent);
+  if (in_unmerged && in_merged) {
+    return true;
+  }
+
+  if (in_unmerged != in_merged) {
+    LOG(WARNING) << "Dropping merge set for parent " << NodeSymbol(parent).str()
+                 << ": missing from the " << (in_unmerged ? "merged" : "unmerged")
+                 << " graph only (inconsistent graphs)";
+  } else {
+    VLOG(1) << "Dropping merge set for deleted parent " << NodeSymbol(parent).str();
+  }
+
+  return false;
+}
+
+}  // namespace
+
 size_t MergeTracker::applyMerges(const SceneGraph& unmerged,
                                  const MergeList& proposals,
                                  SharedDsgInfo& dsg,
@@ -84,13 +118,7 @@ size_t MergeTracker::applyMerges(const SceneGraph& unmerged,
       continue;
     }
 
-    // the frontend can delete nodes from the unmerged graph before the deletion
-    // reaches the merged graph (or vice versa); the merged attributes can't be
-    // rebuilt for a parent missing from either graph
-    if (!unmerged.hasNode(node) || !graph.hasNode(node)) {
-      VLOG(1) << "Dropping merge set for missing parent " << NodeSymbol(node).str()
-              << " (unmerged: " << std::boolalpha << unmerged.hasNode(node)
-              << ", merged: " << graph.hasNode(node) << ")";
+    if (!hasParent(unmerged, graph, node)) {
       merge_sets_.erase(iter);
       continue;
     }
@@ -121,11 +149,7 @@ void MergeTracker::updateAllMergeAttributes(const SceneGraph& unmerged,
   auto iter = merge_sets_.begin();
   while (iter != merge_sets_.end()) {
     const auto parent = iter->first;
-    // see applyMerges: the parent may be missing from either graph
-    if (!unmerged.hasNode(parent) || !merged.hasNode(parent)) {
-      VLOG(1) << "Dropping merge set for missing parent " << NodeSymbol(parent).str()
-              << " (unmerged: " << std::boolalpha << unmerged.hasNode(parent)
-              << ", merged: " << merged.hasNode(parent) << ")";
+    if (!hasParent(unmerged, merged, parent)) {
       iter = merge_sets_.erase(iter);
       continue;
     }
