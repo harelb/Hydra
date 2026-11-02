@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import sys
 
 from .store import ImageStore, ImageStoreWriter
@@ -104,6 +105,31 @@ def _cmd_gc(args) -> int:
     return 0
 
 
+def _cmd_import_legacy(args) -> int:
+    from .legacy import import_legacy
+
+    link = "copy" if args.copy else ("symlink" if args.symlink else "hardlink")
+    stats = import_legacy(
+        args.run_dir,
+        args.out,
+        args.dsg,
+        robot_id=args.robot_id,
+        link=link,
+        sam3_dirs=tuple(args.sam3_dir) if args.sam3_dir else ("sam3_objects",),
+    )
+    if args.write_dsg:
+        from .legacy import find_dsg, strip_legacy_dsg
+
+        src = args.dsg or find_dsg(pathlib.Path(args.run_dir))
+        if src is None:
+            raise SystemExit(
+                "--write-dsg needs --dsg (no scene graph found in the run dir)"
+            )
+        stats["stripped_dsg"] = strip_legacy_dsg(src, args.write_dsg)
+    print(json.dumps(stats, indent=1))
+    return 0
+
+
 def _cmd_check(args) -> int:
     from .check import check_store
 
@@ -170,6 +196,28 @@ def build_parser() -> argparse.ArgumentParser:
         "is still writing it)",
     )
     s.set_defaults(func=_cmd_gc)
+
+    s = sub.add_parser("import-legacy", help="convert a pre-store run directory")
+    s.add_argument("--run-dir", required=True)
+    s.add_argument("--dsg", help="default: <run-dir>/hydra/backend/dsg.json if present")
+    s.add_argument("--out", required=True, help="new store directory")
+    s.add_argument("--robot-id", type=int, default=0)
+    s.add_argument(
+        "--sam3-dir", action="append", help="SAM3 object dirs (default: sam3_objects)"
+    )
+    s.add_argument(
+        "--write-dsg",
+        help="also write a copy of the scene graph without pre-store "
+        "SubKeyframe nodes and image_folder attributes (loadable by upstream spark_dsg)",
+    )
+    g = s.add_mutually_exclusive_group()
+    g.add_argument(
+        "--copy", action="store_true", help="copy images (default: hardlink)"
+    )
+    g.add_argument(
+        "--symlink", action="store_true", help="symlink images (default: hardlink)"
+    )
+    s.set_defaults(func=_cmd_import_legacy)
 
     s = sub.add_parser("check", help="structural consistency checks of a store")
     s.add_argument("store", help="run directory or store directory")

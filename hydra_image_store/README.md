@@ -138,6 +138,8 @@ hydra-image-store sessions <run> [--json]          # rotated sessions + live sto
 hydra-image-store export <store>... --out DIR [--dsg dsg.json] [--copy] [--kept-only]
 hydra-image-store gc <store> [--max-images-per-object N] [--orphans] [--dry-run] [--force]
 hydra-image-store check STORE_OR_RUN [--dsg dsg.json] [--json]
+hydra-image-store import-legacy --run-dir RUN --out STORE [--dsg dsg.json] [--robot-id 0]
+                                [--sam3-dir sam3_objects ...] [--copy | --symlink]
 ```
 
 **export** writes one folder per object, `O_<idx>/frame_<ts>_{rgb.jpg,depth.png,mask.png,meta.json}`.
@@ -167,6 +169,16 @@ that, e.g. when only a read-only viewer has it open.
 observations existing frames, every referenced file exists, keyframes are anchored, and
 sampled images match the calibration size (with cv2 or Pillow). With `--dsg`, keyframe
 anchors and bound nodes must be DSG nodes or merge children.
+
+**import-legacy** converts a pre-store run (`agents/`, `subkeyframes/`, `images/O_*`,
+`sam3_objects/O*`) without touching it. Images are hardlinked by default. Bindings work
+as follows:
+- Agents bind to DSG agent nodes by `image_folder`, or else by timestamp.
+- Sub-keyframes take the anchor of their DSG SubKeyframe node, or else the nearest
+  keyframe.
+- Object observation frames had no pose. They take the anchor and odometry of the
+  nearest imported frame in time. The worst gap is stored in `meta.legacy_obs_max_dt_ns`.
+- Object folders bind by DSG `image_folder`, or else by the NodeSymbol their name encodes.
 
 ## Tests
 
