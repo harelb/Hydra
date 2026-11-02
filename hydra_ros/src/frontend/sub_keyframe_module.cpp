@@ -60,17 +60,18 @@ void declare_config(SubKeyframeModule::Config& config) {
   name("SubKeyframeModule::Config");
   base<VerbosityConfig>(config);
   field(config.sensor_name, "sensor_name");
-  field(config.gate, "gate");
+  field(config.keyframe_policy, "keyframe_policy");
   field(config.tf_lookup, "tf_lookup");
   field(config.queue_max_size, "queue_max_size");
 }
 
 SubKeyframeModule::Config::Config()
-    : VerbosityConfig(VerbosityConfig::default_verbosity("sub_keyframes")) {}
+    : VerbosityConfig(VerbosityConfig::default_verbosity("sub_keyframes")),
+      keyframe_policy(DistancePolicy::Config{0.25, 0.0, 0.0}) {}
 
 SubKeyframeModule::SubKeyframeModule(const Config& config)
     : config(config::checkValid(config)),
-      gate_(config.gate),
+      policy_(config.keyframe_policy.create()),
       store_(GlobalInfo::instance().imageStore()) {
   if (!store_) {
     LOG(INFO) << config.prefix
@@ -112,11 +113,25 @@ void SubKeyframeModule::stopImpl() {
 
 std::string SubKeyframeModule::printInfo() const { return config::toString(config); }
 
+bool SubKeyframeModule::isKeyframe(uint64_t timestamp_ns,
+                                   const Eigen::Isometry3d& world_T_body) {
+  // the policy only needs the stamp and pose of the candidate and the last keyframe
+  auto candidate = std::make_shared<InputData>(nullptr);
+  candidate->timestamp_ns = timestamp_ns;
+  candidate->world_T_body = world_T_body;
+  std::string reason;
+  if (!policy_ || !policy_->shouldAdd(candidate, last_keyframe_, reason)) {
+    MLOG(5) << reason;
+    return false;
+  }
+
+  last_keyframe_ = {candidate};
+  return true;
+}
+
 bool SubKeyframeModule::processInput(const SubKeyframeInput& input,
                                      const Eigen::Isometry3d& world_T_body) {
-  if (!store_ || !input.parse ||
-      !gate_.shouldTrigger(world_T_body.translation(),
-                           Eigen::Quaterniond(world_T_body.rotation()))) {
+  if (!store_ || !input.parse || !isKeyframe(input.timestamp_ns, world_T_body)) {
     return false;
   }
 

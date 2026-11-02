@@ -38,6 +38,7 @@
 
 #include <Eigen/Geometry>
 #include <deque>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -47,7 +48,7 @@
 #include <vector>
 
 #include "hydra/frontend/graph_builder_functor.h"
-#include "hydra/frontend/keyframe_gate.h"
+#include "hydra/frontend/keyframe_selector.h"
 #include "hydra/utils/keyframe_images.h"
 #include "hydra/utils/logging.h"
 
@@ -61,10 +62,10 @@ class ImageStore;
  *
  * Sensor frames of every input are buffered and paired with the agent node created
  * from the same input (agent nodes are stamped with the input timestamp). A keyframe
- * frame is written for a node when the agent moved or rotated far enough since the last
- * keyframe. The frame is anchored to the node (anchor_T_body is the offset between the
- * node and the paired frame, i.e., close to identity), so its pose follows the node
- * when the backend optimizes. No node attributes are modified.
+ * frame is written for a node when the keyframe policy accepts the node pose relative
+ * to the last keyframe. The frame is anchored to the node (anchor_T_body is the offset
+ * between the node and the paired frame, i.e., close to identity), so its pose follows
+ * the node when the backend optimizes. No node attributes are modified.
  */
 class AgentImageExtractor : public GraphBuilderFunctor {
  public:
@@ -73,8 +74,11 @@ class AgentImageExtractor : public GraphBuilderFunctor {
 
     //! Name of the sensor to save images from (empty accepts any sensor)
     std::string sensor_name;
-    //! Motion required between keyframes
-    KeyframeGate::Config gate{1.0, 30.0};
+    //! Policy deciding which agent nodes get keyframes. It is given the timestamp and
+    //! pose of the node and of the last keyframe (no images). Default: DistancePolicy
+    //! with min_pose_separation 1.0, rotation_separation_weight 0 and no time limit,
+    //! i.e., a keyframe every meter of translation
+    config::VirtualConfig<KeyframePolicy> keyframe_policy;
     //! Maximum time difference [s] between an agent node and the paired sensor frame
     double max_pairing_time_diff_s = 0.05;
     //! Number of recent sensor frames retained for pairing. Each entry owns a copy of
@@ -127,7 +131,12 @@ class AgentImageExtractor : public GraphBuilderFunctor {
   std::vector<Keyframe> selectKeyframes(const spark_dsg::SceneGraph& graph,
                                         const std::vector<BufferedFrame>& frames);
 
-  KeyframeGate gate_;
+  //! Whether the node pose is a new keyframe (recorded as the last keyframe if so)
+  bool isKeyframe(uint64_t timestamp_ns, const Eigen::Isometry3d& world_T_node);
+
+  std::unique_ptr<KeyframePolicy> policy_;
+  //! Timestamp and pose (no images) of the last keyframe, if any
+  std::list<InputData::ConstPtr> last_keyframe_;
   std::shared_ptr<ImageStore> store_;
 
   //! New agent nodes that were not paired with a frame yet (oldest first)

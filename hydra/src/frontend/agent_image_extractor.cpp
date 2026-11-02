@@ -67,7 +67,7 @@ void declare_config(AgentImageExtractor::Config& config) {
   name("AgentImageExtractor::Config");
   base<VerbosityConfig>(config);
   field(config.sensor_name, "sensor_name");
-  field(config.gate, "gate");
+  field(config.keyframe_policy, "keyframe_policy");
   field(config.max_pairing_time_diff_s, "max_pairing_time_diff_s", "s");
   field(config.max_buffered_frames, "max_buffered_frames");
   field(config.max_deferred_updates, "max_deferred_updates");
@@ -78,11 +78,12 @@ void declare_config(AgentImageExtractor::Config& config) {
 }
 
 AgentImageExtractor::Config::Config()
-    : VerbosityConfig(VerbosityConfig::default_verbosity("agent_images")) {}
+    : VerbosityConfig(VerbosityConfig::default_verbosity("agent_images")),
+      keyframe_policy(DistancePolicy::Config{1.0, 0.0, 0.0}) {}
 
 AgentImageExtractor::AgentImageExtractor(const Config& config)
     : config(config::checkValid(config)),
-      gate_(config.gate),
+      policy_(config.keyframe_policy.create()),
       store_(GlobalInfo::instance().imageStore()) {
   LOG_IF(INFO, !store_) << config.prefix
                         << "No image store (image_store.path); agent keyframes are "
@@ -220,15 +221,31 @@ std::vector<AgentImageExtractor::Keyframe> AgentImageExtractor::selectKeyframes(
     }
 
     search_start = *frame_idx + 1;
-    if (gate_.shouldTrigger(attrs->position, attrs->world_R_body)) {
-      Eigen::Isometry3d world_T_node = Eigen::Isometry3d::Identity();
-      world_T_node.translation() = attrs->position;
-      world_T_node.linear() = attrs->world_R_body.toRotationMatrix();
+    Eigen::Isometry3d world_T_node = Eigen::Isometry3d::Identity();
+    world_T_node.translation() = attrs->position;
+    world_T_node.linear() = attrs->world_R_body.toRotationMatrix();
+    if (isKeyframe(node_ns, world_T_node)) {
       keyframes.push_back({node_id, node_ns, world_T_node, frames[*frame_idx]});
     }
   }
 
   return keyframes;
+}
+
+bool AgentImageExtractor::isKeyframe(uint64_t timestamp_ns,
+                                     const Eigen::Isometry3d& world_T_node) {
+  // the policy only needs the stamp and pose of the candidate and the last keyframe
+  auto candidate = std::make_shared<InputData>(nullptr);
+  candidate->timestamp_ns = timestamp_ns;
+  candidate->world_T_body = world_T_node;
+  std::string reason;
+  if (!policy_ || !policy_->shouldAdd(candidate, last_keyframe_, reason)) {
+    MLOG(5) << reason;
+    return false;
+  }
+
+  last_keyframe_ = {candidate};
+  return true;
 }
 
 void AgentImageExtractor::callPostUpdate(SharedDsgInfo& dsg, FrontendOutput& output) {

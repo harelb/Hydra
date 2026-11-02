@@ -106,14 +106,22 @@ struct TempDirectory {
 TEST(SubKeyframeModule, ConfigParsesFromYaml) {
   const std::string yaml = R"yaml(
 sensor_name: left_camera
-gate: {min_translation_m: 0.25, min_rotation_deg: 15.0}
+keyframe_policy: {type: DistancePolicy, min_pose_separation: 0.3}
 tf_lookup: {max_tries: 5}
 queue_max_size: 30
 )yaml";
   const auto config = config::fromYaml<SubKeyframeModule::Config>(YAML::Load(yaml));
   EXPECT_EQ(config.sensor_name, "left_camera");
-  EXPECT_DOUBLE_EQ(config.gate.min_translation_m, 0.25);
-  EXPECT_DOUBLE_EQ(config.gate.min_rotation_deg, 15.0);
+  const auto policy = config.keyframe_policy.getUnderlying<DistancePolicy::Config>();
+  ASSERT_TRUE(policy);
+  EXPECT_DOUBLE_EQ(policy->min_pose_separation, 0.3);
+  const auto default_policy =
+      SubKeyframeModule::Config()
+          .keyframe_policy.getUnderlying<DistancePolicy::Config>();
+  ASSERT_TRUE(default_policy);
+  EXPECT_DOUBLE_EQ(default_policy->min_pose_separation, 0.25);
+  EXPECT_DOUBLE_EQ(default_policy->rotation_separation_weight, 0.0);
+  EXPECT_DOUBLE_EQ(default_policy->min_time_separation_s, 0.0);
   EXPECT_EQ(config.queue_max_size, 30u);
   EXPECT_TRUE(config::isValid(config));
   EXPECT_TRUE(config::isValid(SubKeyframeModule::Config()));
@@ -140,7 +148,8 @@ TEST(SubKeyframeModule, NoStoreDisables) {
   EXPECT_FALSE(queues.acceptsSubKeyframes("camera"));
 }
 
-// The module enables the hand-off queue and writes gated images as unanchored frames
+// The module enables the hand-off queue and writes selected images as unanchored
+// frames
 TEST(SubKeyframeModule, WritesUnanchoredFrames) {
   if (!ImageStore::enabled()) {
     GTEST_SKIP() << "built without the image store";
@@ -152,7 +161,7 @@ TEST(SubKeyframeModule, WritesUnanchoredFrames) {
   const StoreGuard guard(output);
   SubKeyframeModule::Config config;
   config.sensor_name = "camera";
-  config.gate.min_translation_m = 0.5;
+  config.keyframe_policy = DistancePolicy::Config{0.5, 0.0, 0.0};
   auto& queues = PipelineQueues::instance();
   EXPECT_FALSE(queues.acceptsSubKeyframes("camera"));
   {
@@ -189,7 +198,7 @@ TEST(SubKeyframeModule, WritesUnanchoredFrames) {
   EXPECT_FALSE(queues.acceptsSubKeyframes("camera"));
 }
 
-// Images rejected by the gate are never parsed
+// Images rejected by the keyframe policy are never parsed
 TEST(SubKeyframeModule, ParsesOnlyGatedImages) {
   if (!ImageStore::enabled()) {
     GTEST_SKIP() << "built without the image store";
@@ -198,7 +207,7 @@ TEST(SubKeyframeModule, ParsesOnlyGatedImages) {
   TempDirectory tmp;
   const StoreGuard guard(tmp.path / "image_store");
   SubKeyframeModule::Config config;
-  config.gate.min_translation_m = 0.5;
+  config.keyframe_policy = DistancePolicy::Config{0.5, 0.0, 0.0};
   SubKeyframeModule module(config);
 
   const auto sensor = std::make_shared<Camera>(makeCameraConfig(), "camera");

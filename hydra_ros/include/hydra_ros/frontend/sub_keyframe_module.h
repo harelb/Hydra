@@ -35,10 +35,11 @@
 #pragma once
 
 #include <hydra/common/module.h>
-#include <hydra/frontend/keyframe_gate.h>
+#include <hydra/frontend/keyframe_selector.h>
 #include <hydra/utils/logging.h>
 
 #include <atomic>
+#include <list>
 #include <memory>
 #include <string>
 #include <thread>
@@ -55,7 +56,7 @@ struct SubKeyframeInput;
  *
  * Drains PipelineQueues::subkeyframe_queue (filled by the image receivers, so it is
  * independent of the rate of the semantic input), looks up the body pose and writes
- * images that pass the keyframe gate (the frame rate knob) to the image store as
+ * images accepted by the keyframe policy (the frame rate knob) to the image store as
  * sub-keyframe frames with their odometric pose. The frontend later anchors them to a
  * nearby agent node (see GraphBuilder::anchorPendingFrames). Disabled if no image store
  * is configured (see GlobalInfo::imageStore). Images queued when the module is stopped
@@ -68,8 +69,11 @@ class SubKeyframeModule : public Module {
 
     //! Name of the sensor to capture sub-keyframes from (empty accepts any sensor)
     std::string sensor_name;
-    //! Motion required between sub-keyframes
-    KeyframeGate::Config gate;
+    //! Policy deciding which images become sub-keyframes. It is given the timestamp
+    //! and body pose of the image and of the last sub-keyframe (no images). Default:
+    //! DistancePolicy with min_pose_separation 0.25, rotation_separation_weight 0 and
+    //! no time limit, i.e., a sub-keyframe every 0.25 m of translation
+    config::VirtualConfig<KeyframePolicy> keyframe_policy;
     //! Body pose lookup
     TFLookup::Config tf_lookup;
     //! Maximum number of pending images (excess is dropped)
@@ -102,7 +106,12 @@ class SubKeyframeModule : public Module {
 
   void stopImpl();
 
-  KeyframeGate gate_;
+  //! Whether the body pose is a new sub-keyframe (recorded as the last one if so)
+  bool isKeyframe(uint64_t timestamp_ns, const Eigen::Isometry3d& world_T_body);
+
+  std::unique_ptr<KeyframePolicy> policy_;
+  //! Timestamp and pose (no images) of the last sub-keyframe, if any
+  std::list<InputData::ConstPtr> last_keyframe_;
   std::shared_ptr<ImageStore> store_;
   std::unique_ptr<TFLookup> lookup_;
   std::atomic<bool> should_shutdown_{false};

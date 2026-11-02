@@ -180,7 +180,8 @@ TEST(AgentImageExtractor, CreatedFromYaml) {
   const auto output = tmp.path / "image_store";
   const auto guard = test::ConfigGuard::WithImageStore(output);
   const auto node = YAML::Load(
-      "{type: AgentImageExtractor, sensor_name: left, gate: {min_translation_m: 0.5}}");
+      "{type: AgentImageExtractor, sensor_name: left, keyframe_policy: {type: "
+      "DistancePolicy, min_pose_separation: 0.5}}");
   const auto config =
       config::fromYaml<config::VirtualConfig<GraphBuilderFunctor>>(node);
   const auto functor = config.create();
@@ -188,8 +189,21 @@ TEST(AgentImageExtractor, CreatedFromYaml) {
   ASSERT_TRUE(extractor);
   EXPECT_TRUE(extractor->enabled());
   EXPECT_EQ(extractor->config.sensor_name, "left");
-  EXPECT_DOUBLE_EQ(extractor->config.gate.min_translation_m, 0.5);
-  EXPECT_DOUBLE_EQ(extractor->config.gate.min_rotation_deg, 30.0);
+  const auto policy =
+      extractor->config.keyframe_policy.getUnderlying<DistancePolicy::Config>();
+  ASSERT_TRUE(policy);
+  EXPECT_DOUBLE_EQ(policy->min_pose_separation, 0.5);
+  // parameters that are not set keep the DistancePolicy defaults
+  EXPECT_DOUBLE_EQ(policy->min_time_separation_s, 0.5);
+
+  // the default policy keys on translation only
+  const AgentImageExtractor::Config defaults;
+  const auto default_policy =
+      defaults.keyframe_policy.getUnderlying<DistancePolicy::Config>();
+  ASSERT_TRUE(default_policy);
+  EXPECT_DOUBLE_EQ(default_policy->min_pose_separation, 1.0);
+  EXPECT_DOUBLE_EQ(default_policy->rotation_separation_weight, 0.0);
+  EXPECT_DOUBLE_EQ(default_policy->min_time_separation_s, 0.0);
   EXPECT_TRUE(fs::exists(output / ImageStore::kDatabaseName));
 }
 
@@ -220,7 +234,7 @@ TEST(AgentImageExtractor, WritesPairedKeyframes) {
   test::TempDirectory tmp;
   const auto output = tmp.path / "image_store";
   AgentImageExtractor::Config config;
-  config.gate.min_translation_m = 1.0;
+  config.keyframe_policy = DistancePolicy::Config{1.0, 0.0, 0.0};
   ExtractorHarness harness(output, config);
   for (const uint64_t stamp_ns : {1000u, 2000u, 3000u}) {
     harness.addFrame(stamp_ns);
@@ -273,7 +287,7 @@ TEST(AgentImageExtractor, FiltersBySensorName) {
 TEST(AgentImageExtractor, DefersMissingFramesBounded) {
   test::TempDirectory tmp;
   AgentImageExtractor::Config config;
-  config.gate.min_translation_m = 0.0;
+  config.keyframe_policy = DistancePolicy::Config{0.0, 0.0, 0.0};
   config.max_deferred_updates = 2;
   ExtractorHarness harness(tmp.path / "image_store", config);
   harness.addFrame(1000);
