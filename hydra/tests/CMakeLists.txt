@@ -78,7 +78,9 @@ target_link_libraries(
   test_${PROJECT_NAME} ${PROJECT_NAME} ${gflags_LIBRARIES} GTest::gtest_main
 )
 if(HYDRA_ENABLE_IMAGE_STORE)
-  target_sources(test_${PROJECT_NAME} PRIVATE utils/test_image_store.cpp)
+  target_sources(
+    test_${PROJECT_NAME} PRIVATE common/test_graph_update.cpp utils/test_image_store.cpp
+  )
   target_compile_definitions(test_${PROJECT_NAME} PRIVATE HYDRA_ENABLE_IMAGE_STORE)
   target_link_libraries(test_${PROJECT_NAME} SQLite::SQLite3)
 endif()

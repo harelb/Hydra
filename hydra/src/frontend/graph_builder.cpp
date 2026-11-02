@@ -49,6 +49,7 @@
 #include "hydra/frontend/mesh_compression.h"
 #include "hydra/frontend/mesh_segmenter.h"
 #include "hydra/odometry/pose_graph_from_odom.h"
+#include "hydra/utils/image_store.h"
 #include "hydra/utils/pgmo_mesh_traits.h"  // IWYU pragma: keep
 #include "hydra/utils/timing_utilities.h"
 
@@ -124,6 +125,7 @@ GraphBuilder::GraphBuilder(const Config& config,
       map_window_(std::move(window)),
       surface_places_(config.surface_places.create(
           GlobalInfo::instance().labelspace().surface_places_labels)),
+      image_store_(GlobalInfo::instance().imageStore()),
       sinks_(Sink::instantiate(config.sinks)) {
   const auto& global_info = GlobalInfo::instance();
   if (config.enable_mesh_objects) {
@@ -145,6 +147,7 @@ GraphBuilder::GraphBuilder(const Config& config,
   functors_.emplace("freespace_places", config.freespace_places.create());
   functors_.emplace("traversability_places", config.traversability_places.create());
   functors_.emplace("frontier_places", config.frontier_places.create());
+  graph_updater_.setImageStore(image_store_, global_info.getRobotPrefix().id);
   for (const auto& [_, functor] : functors_) {
     callbacks_.push_back([&](auto msg) {
       if (msg && functor) {

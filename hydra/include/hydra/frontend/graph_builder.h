@@ -60,6 +60,7 @@ class MeshDelta;
 
 namespace hydra {
 
+class ImageStore;
 struct VolumetricWindow;
 
 class GraphBuilder : public Module {
@@ -165,6 +166,8 @@ class GraphBuilder : public Module {
   std::unique_ptr<MeshSegmenter> segmenter_;
   std::unique_ptr<SurfacePlaceExtractor> surface_places_;
   std::map<std::string, std::unique_ptr<GraphBuilderFunctor>> functors_;
+  //! Image store (if configured), which also records which node each track became
+  std::shared_ptr<ImageStore> image_store_;
 
   OutputQueue::Ptr lcd_input_queue_;
 
