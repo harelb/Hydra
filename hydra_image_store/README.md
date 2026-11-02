@@ -11,10 +11,14 @@ Dependencies: `numpy`. Optional: `Pillow` (mask PNGs, mask export) and `spark_ds
 
 ```
 <store>/store.sqlite                 # WAL mode
-<store>/frames/r<robot>/<ts>_rgb.jpg  # shared by keyframes, sub-keyframes, observation frames
-<store>/frames/r<robot>/<ts>_depth.png
+<store>/frames/r<robot>/<stem>_rgb.jpg  # shared by keyframes, sub-keyframes, observation frames
+<store>/frames/r<robot>/<stem>_depth.png
 <store>/masks/r<robot>/<obs_id>.png   # kept object observations only
 ```
+
+`<stem>` is the timestamp `<ts>` for the robot's first sensor and `<ts>_s<seq>` for the
+others (`seq` = the sensor id's sequence part), so two cameras with the same stamp never
+share a file. The C++ writer and `ImageStoreWriter.add_frame_ref` name files the same way.
 
 ### Sessions
 
@@ -70,6 +74,7 @@ because the original track id is lost.
 from hydra_image_store import ImageStore, load_dsg
 
 store = ImageStore.open("run/image_store", "robot2/image_store")  # readonly=True
+# a missing store raises FileNotFoundError; readonly=False, create=True creates one
 store.canonical(node_id) -> int            # follows node_aliases chains (cycle-safe)
 store.members(node_id) -> set[int]          # canonical + everything merged into it
 store.observations(node_id, kept_only=False, limit=None, order="score"|"time") -> list[Observation]
@@ -102,7 +107,7 @@ invalidated through `PRAGMA data_version`.
 ## Writing (SAM3 discovery, tools)
 
 ```python
-w = ImageStore.open_writer("run/image_store", robot_id=0)
+w = ImageStore.open_writer("run/image_store", robot_id=0)  # creates it (create=False: raise)
 sid = w.add_sensor(name, width, height, fx, fy, cx, cy, depth_scale=0.001, body_T_sensor=None)
 fid = w.add_frame_ref(sid, ts, kind=FrameKind.OBSERVATION, world_T_body_odom=None,
                       rgb=path, depth=path, anchor_node_id=None, anchor_T_body=None,

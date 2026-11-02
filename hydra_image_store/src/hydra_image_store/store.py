@@ -146,10 +146,15 @@ def _resolve_db(path: str | os.PathLike) -> pathlib.Path:
     return p.absolute()
 
 
-def _connect(db: pathlib.Path, readonly: bool) -> sqlite3.Connection:
+def _connect(
+    db: pathlib.Path, readonly: bool, create: bool = False
+) -> sqlite3.Connection:
+    if not db.exists() and (readonly or not create):
+        raise FileNotFoundError(
+            f"no image store at {db}"
+            + ("" if readonly else " (pass create=True to start a new one)")
+        )
     if readonly:
-        if not db.exists():
-            raise FileNotFoundError(f"no image store at {db}")
         uri = "file:" + urllib.parse.quote(str(db)) + "?mode=ro"
         try:
             conn = sqlite3.connect(
@@ -181,10 +186,10 @@ def _connect(db: pathlib.Path, readonly: bool) -> sqlite3.Connection:
 
 
 class _Db:
-    def __init__(self, path, readonly: bool):
+    def __init__(self, path, readonly: bool, create: bool = False):
         self.db_path = _resolve_db(path)
         self.root = self.db_path.parent
-        self.conn = _connect(self.db_path, readonly)
+        self.conn = _connect(self.db_path, readonly, create)
 
     def abs(self, rel: str | None) -> pathlib.Path | None:
         return None if rel is None else self.root / rel
@@ -231,15 +236,26 @@ class ImageStore:
     # --- construction -------------------------------------------------------------------
 
     @classmethod
-    def open(cls, *paths: str | os.PathLike, readonly: bool = True) -> "ImageStore":
+    def open(
+        cls, *paths: str | os.PathLike, readonly: bool = True, create: bool = False
+    ) -> "ImageStore":
+        """Open stores. A missing store raises ``FileNotFoundError``; with
+        ``readonly=False, create=True`` an empty one is created instead."""
         if not paths:
             raise ValueError("ImageStore.open needs at least one store path")
-        return cls([_Db(p, readonly) for p in paths])
+        if create and readonly:
+            raise ValueError("create=True needs readonly=False")
+        return cls([_Db(p, readonly, create) for p in paths])
 
     @staticmethod
-    def open_writer(path: str | os.PathLike, robot_id: int = 0) -> "ImageStoreWriter":
-        """Writer into the store at ``path`` as it is (never rotates, see sessions.py)."""
-        return ImageStoreWriter(path, robot_id)
+    def open_writer(
+        path: str | os.PathLike, robot_id: int = 0, *, create: bool = True
+    ) -> "ImageStoreWriter":
+        """Writer into the store at ``path`` as it is (never rotates, see sessions.py).
+
+        Creates an empty store when there is none (``create=False`` raises instead).
+        """
+        return ImageStoreWriter(path, robot_id, create=create)
 
     @staticmethod
     def sessions(run_dir: str | os.PathLike, include_live: bool = True):
@@ -588,6 +604,13 @@ def _read_image(path) -> np.ndarray:
         return np.array(im)
 
 
+def frame_stem(timestamp_ns: int, sensor_id: int) -> str:
+    """File stem of a frame's images, as the C++ writer names them: ``<ts>`` for the
+    robot's first sensor (sequence 0), else ``<ts>_s<sensor seq>``."""
+    seq = int(sensor_id) & SEQ_MASK
+    return f"{int(timestamp_ns)}_s{seq}" if seq else str(int(timestamp_ns))
+
+
 def _place_file(src: pathlib.Path, dst: pathlib.Path, link: str) -> None:
     """Materialize ``src`` at ``dst`` by hardlink (falling back to copy), symlink or copy."""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -614,8 +637,10 @@ class ImageStoreWriter:
     resumes numbering and concurrent writers (e.g. the C++ store) never collide.
     """
 
-    def __init__(self, path: str | os.PathLike, robot_id: int = 0):
-        self._db = _Db(path, readonly=False)
+    def __init__(
+        self, path: str | os.PathLike, robot_id: int = 0, *, create: bool = True
+    ):
+        self._db = _Db(path, readonly=False, create=create)
         self.robot_id = int(robot_id)
         self.root = self._db.root
         self._batch_depth = 0
@@ -751,12 +776,15 @@ class ImageStoreWriter:
 
         ``rgb`` / ``depth`` are paths to existing files. Files already inside the store
         are referenced in place; others are hardlinked (copy across filesystems),
-        symlinked or copied to ``frames/r<robot>/<ts>_{rgb,depth}<ext>`` per ``link``.
+        symlinked or copied to ``frames/r<robot>/<stem>_{rgb,depth}<ext>`` per ``link``,
+        where ``<stem>`` is ``<ts>`` for the robot's first sensor and ``<ts>_s<seq>`` for
+        the others (the C++ writer's naming, so two sensors at one stamp never share a
+        file).
         A frame with the same (sensor, timestamp) is reused: missing image paths and a
         missing anchor are filled in, nothing else changes.
         """
         ts = int(timestamp_ns)
-        base = f"frames/r{self.robot_id}/{ts}"
+        base = f"frames/r{self.robot_id}/{frame_stem(ts, sensor_id)}"
         with self.batch():
             row = self.conn.execute(
                 "SELECT frame_id, rgb_path, depth_path, anchor_node_id FROM frames "

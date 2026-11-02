@@ -282,3 +282,31 @@ def test_pose_from_spark_dsg(synthetic):
         T, src = store.frame_pose(skf, G, with_source=True)
         assert src == "anchor"
         np.testing.assert_allclose(T, expected, atol=1e-9)
+
+
+def test_python_writer_names_frames_like_cpp(tmp_path):
+    """Second and later sensors get the C++ writer's ``_s<seq>`` suffix, so two sensors
+    with the same stamp never share an image file."""
+    src = write_image(tmp_path / "a.jpg")
+    w = ImageStore.open_writer(tmp_path / "st", robot_id=2)
+    s0 = w.add_sensor("front", 8, 6, 5, 5, 4, 3)
+    s1 = w.add_sensor("left", 8, 6, 5, 5, 4, 3)
+    f0 = w.add_frame_ref(s0, 42, rgb=src, link="copy")
+    f1 = w.add_frame_ref(s1, 42, rgb=src, link="copy")
+    reader = w.reader()
+    assert reader.frame(f0).rgb_path.name == "42_rgb.jpg"
+    assert reader.frame(f1).rgb_path.name == "42_s1_rgb.jpg"
+    assert reader.frame(f0).rgb_path.parent.name == "r2"
+    w.close()
+
+
+def test_open_does_not_create_a_store(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        ImageStore.open(tmp_path / "nope", readonly=False)
+    with pytest.raises(FileNotFoundError):
+        ImageStore.open_writer(tmp_path / "nope", create=False)
+    assert not (tmp_path / "nope").exists()
+    with pytest.raises(ValueError):
+        ImageStore.open(tmp_path / "nope", create=True)
+    ImageStore.open(tmp_path / "new", readonly=False, create=True).close()
+    assert (tmp_path / "new" / "store.sqlite").exists()
