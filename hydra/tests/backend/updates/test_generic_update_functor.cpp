@@ -36,6 +36,7 @@
 #include <glog/logging.h>
 #include <glog/stl_logging.h>
 #include <gtest/gtest.h>
+#include <hydra/backend/merge_tracker.h>
 #include <hydra/backend/updates/generic_update_functor.h>
 #include <kimera_pgmo/deformation_graph.h>
 #include <spark_dsg/scene_graph.h>
@@ -180,6 +181,51 @@ TEST(GenericUpdateFunctor, DeformsObjectPose) {
       dsg->graph->getNode(0).attributes<ObjectNodeAttributes>(), transform, pos, rot);
   expectPose(
       unmerged->getNode(0).attributes<ObjectNodeAttributes>(), transform, pos, rot);
+}
+
+TEST(GenericUpdateFunctor, MergeHookAppliesLastTransform) {
+  const Eigen::Vector3d pos(1.0, 1.0, 0.5);
+  const Eigen::Quaterniond rot = Eigen::Quaterniond::Identity();
+  auto unmerged = test::makeSharedDsg()->graph;
+  auto dsg = test::makeSharedDsg();
+  for (const auto node_id : {0, 1}) {
+    unmerged->emplaceNode(DsgLayers::OBJECTS, node_id, makeObject(pos, rot));
+    dsg->graph->emplaceNode(DsgLayers::OBJECTS, node_id, makeObject(pos, rot));
+  }
+
+  const auto transform = makeTransform(-M_PI / 3.0, Eigen::Vector3d(0.5, 0.5, 1.0));
+  auto dgraph = test::makeRigidDeformationGraph(transform);
+  UpdateInfo::ConstPtr info(
+      new UpdateInfo{0, nullptr, nullptr, true, {}, dgraph.get()});
+  GenericUpdateFunctor functor(defaultConfig());
+  const auto hooks = functor.hooks();
+  ASSERT_TRUE(hooks.merge);
+
+  // no deformation yet: the merged attributes are the parent's
+  auto attrs = hooks.merge(*unmerged, {0, 1});
+  ASSERT_TRUE(attrs);
+  EXPECT_EQ(*attrs, unmerged->getNode(0).attributes());
+
+  functor.call(*unmerged, *dsg, info);
+
+  // the unmerged parent is already deformed: merging must not deform it again
+  attrs = hooks.merge(*unmerged, {0, 1});
+  ASSERT_TRUE(attrs);
+  expectPose(dynamic_cast<const ObjectNodeAttributes&>(*attrs), transform, pos, rot);
+
+  // a parent that holds the odometric pose (e.g., refreshed by the frontend) is
+  // brought into the optimized frame
+  unmerged->setNodeAttributes(0, makeObject(pos, rot));
+  attrs = hooks.merge(*unmerged, {0, 1});
+  ASSERT_TRUE(attrs);
+  expectPose(dynamic_cast<const ObjectNodeAttributes&>(*attrs), transform, pos, rot);
+
+  // the merge tracker writes the hook result into the merged graph
+  MergeTracker tracker;
+  EXPECT_EQ(tracker.applyMerges(*unmerged, {{1, 0}}, *dsg, hooks.merge), 1u);
+  EXPECT_FALSE(dsg->graph->hasNode(1));
+  expectPose(
+      dsg->graph->getNode(0).attributes<ObjectNodeAttributes>(), transform, pos, rot);
 }
 
 }  // namespace hydra
