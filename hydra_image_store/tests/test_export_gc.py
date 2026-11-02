@@ -133,3 +133,72 @@ def test_cli_info(synthetic, capsys):
     assert "observations 5 (kept 3)" in out and "keyframe 2" in out
     main(["info", "--json", str(synthetic["dir"])])
     assert json.loads(capsys.readouterr().out)[0]["tracks"] == 3
+
+
+def test_gc_unlinks_only_after_commit(synthetic, monkeypatch):
+    """A failure inside the transaction rolls rows back and leaves every file."""
+    import sqlite3
+
+    root = synthetic["dir"]
+    before = sorted(p for p in root.rglob("*") if p.is_file())
+    w = ImageStore.open_writer(root)
+    real_execute = sqlite3.Connection.execute
+
+    class Boom(Exception):
+        pass
+
+    def execute(self, sql, *args):
+        if sql.startswith("UPDATE frames SET rgb_path = NULL"):
+            raise Boom()
+        return real_execute(self, sql, *args)
+
+    conn = w.conn
+    proxy = type("Conn", (), {})()
+    proxy.execute = lambda sql, *a: execute(conn, sql, *a)
+    monkeypatch.setattr(type(w), "conn", property(lambda self: proxy))
+    try:
+        gc_store(w, 1, orphans=True)
+    except Boom:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected the injected failure")
+    monkeypatch.undo()
+    w.close()
+    assert sorted(p for p in root.rglob("*") if p.is_file()) == before
+    with ImageStore.open(root) as store:
+        assert sum(o.mask_path is not None for o in store.observations(OBJ_A)) == 2
+
+
+def test_gc_refuses_store_open_elsewhere(synthetic, capsys):
+    import subprocess
+    import sys
+
+    root = synthetic["dir"]
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sqlite3, sys, time; c = sqlite3.connect(sys.argv[1]); "
+            "c.execute('SELECT 1 FROM meta').fetchall(); print('open', flush=True); "
+            "time.sleep(60)",
+            str(root / "store.sqlite"),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "open"
+        assert main(["gc", str(root), "--dry-run"]) == 1
+        err = capsys.readouterr().err
+        assert "gc refused" in err and f"pid {holder.pid}" in err
+        assert main(["gc", str(root), "--dry-run", "--force"]) == 0
+    finally:
+        holder.kill()
+        holder.wait()
+    assert main(["gc", str(root), "--dry-run"]) == 0
+
+
+def test_gc_does_not_create_a_store(tmp_path, capsys):
+    assert main(["gc", str(tmp_path / "nope")]) == 1
+    assert "no image store" in capsys.readouterr().err
+    assert not (tmp_path / "nope").exists()

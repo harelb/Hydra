@@ -87,15 +87,20 @@ def _cmd_export(args) -> int:
 
 
 def _cmd_gc(args) -> int:
-    from .gc import gc_store
+    from .gc import StoreInUseError, gc_store
 
-    with ImageStoreWriter(args.store) as writer:
-        stats = gc_store(
-            writer,
-            args.max_images_per_object,
-            orphans=args.orphans,
-            dry_run=args.dry_run,
-        )
+    try:
+        with ImageStoreWriter(args.store, create=False) as writer:
+            stats = gc_store(
+                writer,
+                args.max_images_per_object,
+                orphans=args.orphans,
+                dry_run=args.dry_run,
+                force=args.force,
+            )
+    except (FileNotFoundError, StoreInUseError) as exc:
+        print(f"gc refused: {exc}", file=sys.stderr)
+        return 1
     print(json.dumps(stats, indent=1))
     return 0
 
@@ -169,7 +174,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--kept-only", action="store_true", help="only kept observations")
     s.set_defaults(func=_cmd_export)
 
-    s = sub.add_parser("gc", help="delete pixels no kept observation needs")
+    s = sub.add_parser(
+        "gc",
+        help="delete pixels no kept observation needs (not on a store Hydra is writing)",
+    )
     s.add_argument("store")
     s.add_argument(
         "--max-images-per-object",
@@ -181,6 +189,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--orphans", action="store_true", help="also delete unreferenced files"
     )
     s.add_argument("--dry-run", action="store_true")
+    s.add_argument(
+        "--force",
+        action="store_true",
+        help="run even though another process has the store open (never while Hydra "
+        "is still writing it)",
+    )
     s.set_defaults(func=_cmd_gc)
 
     s = sub.add_parser("import-legacy", help="convert a pre-store run directory")

@@ -134,7 +134,7 @@ work on the same file at the same time.
 hydra-image-store info <store>... [--json]
 hydra-image-store sessions <run> [--json]          # rotated sessions + live store, with DSGs
 hydra-image-store export <store>... --out DIR [--dsg dsg.json] [--copy] [--kept-only]
-hydra-image-store gc <store> [--max-images-per-object N] [--orphans] [--dry-run]
+hydra-image-store gc <store> [--max-images-per-object N] [--orphans] [--dry-run] [--force]
 hydra-image-store check STORE_OR_RUN [--dsg dsg.json] [--json]
 hydra-image-store import-legacy --run-dir RUN --out STORE [--dsg dsg.json] [--robot-id 0]
                                 [--sam3-dir sam3_objects ...] [--copy | --symlink]
@@ -155,7 +155,12 @@ copied with `--copy`. Each `meta.json` holds:
 deletes the masks of unkept observations and the rgb/depth images of observation frames
 (kind 2) that no kept observation references. With `--orphans` it also deletes
 unreferenced files. Rows stay; their paths are set to NULL. Keyframe and sub-keyframe
-images are never deleted.
+images are never deleted. The row updates are committed before any file is unlinked, so a
+failure leaves unreferenced files (removed by a later `--orphans`), never rows pointing at
+deleted files. **Do not run gc on a store Hydra is still writing**: Hydra's uncommitted
+rows can reference files gc deletes. gc refuses when another process has `store.sqlite`
+(or its `-wal`/`-shm`) open, as seen in Linux `/proc`, and names it; `--force` overrides
+that, e.g. when only a console reader has it open.
 
 **check** runs cheap structural checks (`check_store(store_or_run_dir, dsg=None)` returns
 `{"ok", "checks": {name: bool}, "stats", "store"}`): frames reference existing sensors,
