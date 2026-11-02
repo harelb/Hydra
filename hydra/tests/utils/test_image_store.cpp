@@ -800,6 +800,48 @@ TEST(ImageStore, OtherSchemaVersionIsNotModified) {
       "99");
 }
 
+// A failed query must not leave its statement unusable for later operations
+TEST(ImageStore, RecoversAfterFailedQuery) {
+  test::TempDirectory tmp;
+  auto store = ImageStore::open(tmp.path);
+  ASSERT_TRUE(store);
+  const auto sensor = store->addSensor(0, "camera", makeCalib());
+  store->addFrame(makeFrame(sensor, 100, ImageStore::FrameKind::Keyframe));
+  store->flush();
+
+  const auto exec_other = [&](const std::string& sql) {
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open((tmp.path / "store.sqlite").c_str(), &db), SQLITE_OK);
+    EXPECT_EQ(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_close(db);
+  };
+
+  // another writer added a frame at 200 that fails every lookup by timestamp (abs
+  // overflows), so the lookup of the frame at 200 fails while stepping
+  exec_other(
+      "ALTER TABLE frames RENAME TO frames_real; "
+      "INSERT INTO frames_real (frame_id, robot_id, sensor_id, timestamp_ns, kind, "
+      "world_T_body_odom) VALUES (999, 0, " +
+      id(sensor) +
+      ", 200, 0, x'00'); "
+      "CREATE VIEW frames AS SELECT frame_id, robot_id, sensor_id, CASE WHEN "
+      "timestamp_ns = 200 THEN abs(-9223372036854775807 - 1) ELSE timestamp_ns END "
+      "AS timestamp_ns, kind, world_T_body_odom, anchor_node_id, anchor_T_body, "
+      "rgb_path, depth_path FROM frames_real");
+  store->addFrame(makeFrame(sensor, 200, ImageStore::FrameKind::Keyframe));
+  store->flush();
+  exec_other(
+      "DROP VIEW frames; DELETE FROM frames_real WHERE frame_id = 999; "
+      "ALTER TABLE frames_real RENAME TO frames");
+
+  store->addFrame(makeFrame(sensor, 300, ImageStore::FrameKind::Keyframe));
+  store->flush();
+  EXPECT_EQ(test::queryValue(tmp.path,
+                             "SELECT group_concat(timestamp_ns) FROM (SELECT "
+                             "timestamp_ns FROM frames ORDER BY timestamp_ns)"),
+            "100,300");
+}
+
 // A store left by an earlier session is moved to sessions/<k> with its scene graph
 TEST(ImageStore, RotatesEarlierSession) {
   test::TempDirectory tmp;

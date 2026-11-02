@@ -112,11 +112,28 @@ struct Statement {
     return value ? bind(i, *value) : bindNull(i);
   }
 
+  //! Reset the statement and clear its bindings
+  void reset() {
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+  }
+
+  //! Resets a statement on every path out of a scope (e.g., after a failed step)
+  class ScopedReset {
+   public:
+    explicit ScopedReset(Statement& stmt) : stmt_(stmt) {}
+    ~ScopedReset() { stmt_.reset(); }
+    ScopedReset(const ScopedReset&) = delete;
+    ScopedReset& operator=(const ScopedReset&) = delete;
+
+   private:
+    Statement& stmt_;
+  };
+
   //! Run a statement without results (resets it afterwards)
   void run() {
     const auto ret = sqlite3_step(stmt);
-    sqlite3_reset(stmt);
-    sqlite3_clear_bindings(stmt);
+    reset();
     if (ret != SQLITE_DONE && ret != SQLITE_ROW) {
       throw std::runtime_error(std::string("statement failed: ") +
                                sqlite3_errmsg(sqlite3_db_handle(stmt)));
@@ -130,8 +147,9 @@ struct Statement {
     }
 
     if (ret != SQLITE_DONE) {
-      throw std::runtime_error(std::string("query failed: ") +
-                               sqlite3_errmsg(sqlite3_db_handle(stmt)));
+      const std::string msg = sqlite3_errmsg(sqlite3_db_handle(stmt));
+      reset();
+      throw std::runtime_error("query failed: " + msg);
     }
 
     return false;
@@ -152,7 +170,7 @@ struct Statement {
   Statement& checkBind(int ret, int i) {
     if (ret != SQLITE_OK) {
       const std::string msg = sqlite3_errmsg(sqlite3_db_handle(stmt));
-      sqlite3_clear_bindings(stmt);
+      reset();
       throw std::runtime_error("failed to bind parameter " + std::to_string(i) + ": " +
                                msg);
     }
@@ -296,11 +314,9 @@ struct ImageStore::Impl {
 
   //! Whether a single-parameter query returns a row
   static bool hasRow(Statement& stmt, int64_t value) {
+    const Statement::ScopedReset reset(stmt);
     stmt.bind(1, value);
-    const bool found = stmt.step();
-    sqlite3_reset(stmt.stmt);
-    sqlite3_clear_bindings(stmt.stmt);
-    return found;
+    return stmt.step();
   }
 
   //! Advance the sequences past the ids other writers committed
@@ -439,14 +455,15 @@ void ImageStore::Impl::syncSequences() {
 uint64_t ImageStore::Impl::commitSensorId(uint64_t sensor_id,
                                           int robot_id,
                                           const std::string& name) {
-  find_sensor->bind(1, static_cast<int64_t>(robot_id)).bind(2, name);
   std::optional<uint64_t> existing;
-  if (find_sensor->step()) {
-    existing = find_sensor->integer(0);
+  {
+    const Statement::ScopedReset reset(*find_sensor);
+    find_sensor->bind(1, static_cast<int64_t>(robot_id)).bind(2, name);
+    if (find_sensor->step()) {
+      existing = find_sensor->integer(0);
+    }
   }
 
-  sqlite3_reset(find_sensor->stmt);
-  sqlite3_clear_bindings(find_sensor->stmt);
   uint64_t final_id = sensor_id;
   if (existing) {
     final_id = *existing;
@@ -464,15 +481,16 @@ uint64_t ImageStore::Impl::commitSensorId(uint64_t sensor_id,
 bool ImageStore::Impl::commitFrameId(uint64_t& frame_id,
                                      uint64_t sensor_id,
                                      uint64_t timestamp_ns) {
-  find_frame->bind(1, static_cast<int64_t>(sensor_id))
-      .bind(2, static_cast<int64_t>(timestamp_ns));
   std::optional<uint64_t> existing;
-  if (find_frame->step()) {
-    existing = find_frame->integer(0);
+  {
+    const Statement::ScopedReset reset(*find_frame);
+    find_frame->bind(1, static_cast<int64_t>(sensor_id))
+        .bind(2, static_cast<int64_t>(timestamp_ns));
+    if (find_frame->step()) {
+      existing = find_frame->integer(0);
+    }
   }
 
-  sqlite3_reset(find_frame->stmt);
-  sqlite3_clear_bindings(find_frame->stmt);
   const auto original = frame_id;
   bool is_new = true;
   if (existing) {
@@ -1027,14 +1045,12 @@ uint64_t ImageStore::addFrame(const Frame& frame,
       // another writer added the frame: fill in what this frame adds
       insert = false;
       auto& state = *impl->frame_state;
+      const Statement::ScopedReset reset(state);
       state.bind(1, static_cast<int64_t>(target));
       if (state.step()) {
         kind_update = kind < state.integer(0);
         anchor = frame.anchor_node && state.integer(1) != 0;
       }
-
-      sqlite3_reset(state.stmt);
-      sqlite3_clear_bindings(state.stmt);
     }
 
     if (insert) {
