@@ -844,6 +844,18 @@ TEST(ImageStore, EmptyStoreDoesNotRotate) {
   EXPECT_TRUE(fs::exists(tmp.path / "missing/image_store/store.sqlite"));
 }
 
+// Rotation only moves directories that hold a store: anything else is left in place
+// and the store is not opened
+TEST(ImageStore, RotateRefusesNonStoreDirectory) {
+  test::TempDirectory tmp;
+  const auto path = tmp.path / "run/image_store";
+  writeFile(path / "notes.txt", "not a store");
+  EXPECT_FALSE(openRotating(path));
+  EXPECT_EQ(readFile(path / "notes.txt"), "not a store");
+  EXPECT_FALSE(fs::exists(path / ImageStore::kDatabaseName));
+  EXPECT_FALSE(fs::exists(tmp.path / "run/sessions"));
+}
+
 // Sessions are numbered after the largest existing session
 TEST(ImageStore, SessionIndexIncrements) {
   test::TempDirectory tmp;

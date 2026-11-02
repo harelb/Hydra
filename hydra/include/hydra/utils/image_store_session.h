@@ -43,7 +43,9 @@ namespace hydra::image_store {
  *
  * Does nothing for an empty or missing directory. With OnExisting::Rotate, moves the
  * store of the earlier session to <parent>/sessions/<k>/ together with copies of its
- * session artifacts and a session.json summary (see ImageStoreConfig).
+ * session artifacts and a session.json summary (see ImageStoreConfig). Rotation only
+ * moves a directory that holds a store database (ImageStore::kDatabaseName); any
+ * other non-empty directory is left untouched and the store is not opened.
  * @returns Whether the store may be opened
  */
 bool prepareSession(const ImageStoreConfig& config);

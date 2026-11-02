@@ -84,6 +84,12 @@ bool isNonEmptyDirectory(const fs::path& path) {
   return fs::directory_iterator(path, ec) != fs::directory_iterator();
 }
 
+//! Whether the directory holds a store database (i.e., was written by ImageStore)
+bool isStoreDirectory(const fs::path& path) {
+  std::error_code ec;
+  return fs::is_regular_file(path / ImageStore::kDatabaseName, ec);
+}
+
 std::string jsonString(const std::string& value) {
   std::stringstream ss;
   ss << '"';
@@ -308,6 +314,16 @@ bool prepareSession(const ImageStoreConfig& config) {
       return false;
     case ImageStoreConfig::OnExisting::Rotate:
     default:
+      if (!isStoreDirectory(config.path)) {
+        // only ever move a directory that we wrote
+        LOG(ERROR) << "[ImageStore] " << config.path << " is not empty but holds no "
+                   << ImageStore::kDatabaseName
+                   << ", so it is not an image store; on_existing is 'rotate' but "
+                      "refusing to move it. Not opening the store (image store "
+                      "disabled): point image_store.path at a new or store directory";
+        return false;
+      }
+
       try {
         return rotateStore(config);
       } catch (const std::exception& e) {
