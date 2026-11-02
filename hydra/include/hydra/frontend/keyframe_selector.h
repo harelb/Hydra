@@ -78,6 +78,8 @@ class DistancePolicy : public KeyframePolicy {
                      std::string& reason) const override;
 };
 
+void declare_config(DistancePolicy::Config& config);
+
 class KeyframeSelector : public GraphBuilderFunctor {
  public:
   using Keyframes = std::list<InputData::ConstPtr>;

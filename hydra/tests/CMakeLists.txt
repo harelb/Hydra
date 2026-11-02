@@ -30,6 +30,7 @@ add_executable(
   frontend/test_graph_connector.cpp
   frontend/test_mesh_compression.cpp
   frontend/test_mesh_segmenter.cpp
+  frontend/test_subkeyframe_anchor.cpp
   frontend/test_feature_selector.cpp
   input/test_camera.cpp
   input/test_input_data_io.cpp
@@ -79,7 +80,9 @@ target_link_libraries(
 )
 if(HYDRA_ENABLE_IMAGE_STORE)
   target_sources(
-    test_${PROJECT_NAME} PRIVATE common/test_graph_update.cpp utils/test_image_store.cpp
+    test_${PROJECT_NAME}
+    PRIVATE common/test_graph_update.cpp frontend/test_agent_image_extractor.cpp
+            utils/test_image_store.cpp
   )
   target_compile_definitions(test_${PROJECT_NAME} PRIVATE HYDRA_ENABLE_IMAGE_STORE)
   target_link_libraries(test_${PROJECT_NAME} SQLite::SQLite3)
