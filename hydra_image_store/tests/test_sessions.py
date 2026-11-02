@@ -105,3 +105,23 @@ def test_cli_sessions(tmp_path, capsys):
     text = capsys.readouterr().out
     assert "session 2:" in text and "rotated at 2026-10-18T00:00:00Z" in text
     assert main(["sessions", str(tmp_path / "missing")]) == 1
+
+
+def test_session_dsg_follows_artifacts_dir(tmp_path):
+    """Hydra copies artifacts to sessions/<k>/<basename(session_artifacts_dir)> and
+    records that name as ``artifacts_dir`` in session.json."""
+    run = tmp_path / "run"
+    _write_session(run / "sessions/1", 10.0, 100)
+    s1 = run / "sessions/1"
+    (s1 / "hydra").rename(s1 / "hydra_out")
+    (s1 / "session.json").write_text(json.dumps({"artifacts_dir": "hydra_out"}))
+    _write_session(run / "sessions/2", 20.0, 200)
+    (run / "sessions/2/session.json").write_text(json.dumps({"artifacts_dir": None}))
+    first, second = ImageStore.sessions(run)
+    assert first.dsg_path() == s1 / "hydra_out/backend/dsg.json"
+    assert second.dsg_path() == run / "sessions/2/hydra/backend/dsg.json"
+    with first.open() as store:
+        (frame,) = store.frames(kind=FrameKind.KEYFRAME)
+        T, src = store.body_pose(frame, first.load_dsg())
+    assert src == "anchor"
+    np.testing.assert_allclose(T[:3, 3], [10.0, 0, 0])

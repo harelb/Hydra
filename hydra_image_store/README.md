@@ -36,7 +36,9 @@ A rotated run looks like this:
 <run>/hydra/backend/dsg.json       # its scene graph (written when Hydra shuts down)
 <run>/sessions/<k>/image_store/    # store of the k-th earlier session, k = 1, 2, ...
 <run>/sessions/<k>/hydra/{backend,frontend}/dsg*.json, mesh.ply, ...
-                                   # copy of that session's saved scene graphs
+                                   # copy of that session's saved scene graphs (named
+                                   # after basename(session_artifacts_dir), recorded as
+                                   # "artifacts_dir" in session.json)
 <run>/sessions/<k>/session.json    # rotated_at, source paths, counts, robot_ids, artifacts
 ```
 
@@ -54,7 +56,7 @@ deliberately writes into the live store.
 for s in ImageStore.sessions("run"):      # oldest first, live session last
     s.index, s.live, s.store, s.info       # info = session.json
     with s.open() as store:
-        dsg = s.load_dsg()                 # hydra/backend/dsg.json of that session
+        dsg = s.load_dsg()                 # <artifacts_dir>/backend/dsg.json of that session
         store.frame_pose(frame, dsg)
 ```
 

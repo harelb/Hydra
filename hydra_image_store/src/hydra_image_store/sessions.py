@@ -7,7 +7,10 @@ describes the session that wrote it. When Hydra first opens a non-empty store wi
     <run>/image_store/                live store of the current session
     <run>/hydra/backend/dsg.json      its scene graph (written when Hydra shuts down)
     <run>/sessions/<k>/image_store/   store of the k-th earlier session
-    <run>/sessions/<k>/hydra/...      copy of that session's saved scene graphs
+    <run>/sessions/<k>/hydra/...      copy of that session's saved scene graphs (the
+                                      directory is named after the basename of
+                                      session_artifacts_dir, ``artifacts_dir`` in
+                                      session.json)
     <run>/sessions/<k>/session.json   rotation time, source paths, counts
 
 so ``<run>/sessions/<k>`` has the layout of a run directory. Writers outside Hydra
@@ -53,12 +56,25 @@ class Session:
     ) -> pathlib.Path | None:
         """Saved scene graph of the session (``stage`` is ``backend`` or ``frontend``)."""
         path = (
-            self.root
-            / DSG_DIR
+            self.artifacts_dir
             / stage
             / ("dsg_with_mesh.json" if with_mesh else "dsg.json")
         )
         return path if path.exists() else None
+
+    @property
+    def artifacts_dir(self) -> pathlib.Path:
+        """Directory holding the session's scene graphs.
+
+        For a rotated session this is ``sessions/<k>/<artifacts_dir>``, where Hydra
+        records ``artifacts_dir`` (the basename of ``image_store.session_artifacts_dir``)
+        in ``session.json``. The live session, and a ``session.json`` without the key,
+        use ``hydra/``.
+        """
+        name = self.info.get("artifacts_dir") if self.info else None
+        if isinstance(name, str) and name and pathlib.PurePath(name).name == name:
+            return self.root / name
+        return self.root / DSG_DIR
 
     def open(self, readonly: bool = True):
         """Open the session's store (see :meth:`ImageStore.open`)."""
