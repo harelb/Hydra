@@ -139,7 +139,7 @@ TEST(DsgUpdater, ReportsNewMerges) {
   EXPECT_EQ(target->merges, expected);
 
   // resetting the backend graph undoes every merge
-  updater.resetBackendDsg(10);
+  updater.reset(10);
   runRound(updater, {});
   EXPECT_EQ(target->new_merges, Updates({{0, std::nullopt}, {1, std::nullopt}}));
   EXPECT_TRUE(target->merges.empty());
@@ -170,7 +170,7 @@ TEST(DsgUpdater, MirrorsMergesIntoImageStore) {
   EXPECT_EQ(aliases(), test::StoreRows({{"0", "3"}, {"1", "3"}, {"2", "3"}}));
 
   // removal after the merges are recomputed
-  updater.resetBackendDsg(10);
+  updater.reset(10);
   runRound(updater, {{2, 3}});
   EXPECT_EQ(aliases(), test::StoreRows({{"2", "3"}}));
   EXPECT_EQ(target->new_merges, Updates({{0, std::nullopt}, {1, std::nullopt}}));

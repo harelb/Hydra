@@ -34,6 +34,8 @@
  * -------------------------------------------------------------------------- */
 #include <gtest/gtest.h>
 #include <hydra/places/block_traversability_clustering.h>
+#include <hydra/places/traversability_estimator.h>
+#include <hydra/places/traversability_postprocessing.h>
 
 namespace hydra::places {
 
@@ -90,5 +92,113 @@ TEST(TraversabilityPlaces, RangeProjection) {
   EXPECT_EQ(range.projectToNextBlock(2, 10, 3), Range(2, 0, 4, 2));  // top
   EXPECT_EQ(range.projectToNextBlock(3, 10, 3), Range(0, 3, 2, 5));  // right
 };
+
+TEST(TraversabilityPlaces, RobotFootprintTraversability) {
+  // 0.1m voxels, 10 voxels per side, blocks covering [-1, 1)^2.
+  const auto make_layer = []() {
+    TraversabilityLayer layer(0.1f, 10);
+    for (int x = -1; x <= 0; ++x) {
+      for (int y = -1; y <= 0; ++y) {
+        layer.allocateBlock(BlockIndex(x, y, 0), 10);
+      }
+    }
+    return layer;
+  };
+
+  const auto traversed_at = [](const TraversabilityLayer& layer, int x, int y) {
+    const BlockIndex block_index(x < 0 ? -1 : 0, y < 0 ? -1 : 0, 0);
+    const Index2D local(x - block_index.x() * 10, y - block_index.y() * 10);
+    return layer.getBlock(block_index).voxel(local).traversed;
+  };
+
+  const auto num_traversed = [](const TraversabilityLayer& layer) {
+    size_t num = 0;
+    for (const auto& block : layer) {
+      for (const auto& voxel : block.voxels) {
+        num += voxel.traversed;
+      }
+    }
+    return num;
+  };
+
+  // 0.24m x 0.24m footprint centered on the robot.
+  RobotFootprintTraversability::Config config;
+  config.bbox_min = Eigen::Vector2f(-0.12f, -0.12f);
+  config.bbox_max = Eigen::Vector2f(0.12f, 0.12f);
+  const RobotFootprintTraversability processor(config);
+
+  // Robot in voxel (-1, 0), so the footprint straddles the block boundary at x = 0.
+  auto layer = make_layer();
+  Eigen::Isometry3f world_T_body = Eigen::Isometry3f::Identity();
+  world_T_body.translation() = Eigen::Vector3f(-0.05f, 0.05f, 0.5f);
+  processor.addFootprint(world_T_body, layer);
+
+  // Footprint covers x in [-0.17, 0.07] and y in [-0.07, 0.17], i.e., 3x3 voxels.
+  EXPECT_EQ(num_traversed(layer), 9u);
+  for (int x = -10; x < 10; ++x) {
+    for (int y = -10; y < 10; ++y) {
+      const bool expected = x >= -2 && x <= 0 && y >= -1 && y <= 1;
+      EXPECT_EQ(traversed_at(layer, x, y), expected) << "x=" << x << ", y=" << y;
+    }
+  }
+
+  // Footprint persists after the estimator resets the geometry, and only blocks with
+  // newly traversed voxels are marked for classification.
+  for (auto& block : layer) {
+    block.updated = false;
+    for (auto& voxel : block.voxels) {
+      voxel.resetGeometry();
+    }
+  }
+  world_T_body.translation() = Eigen::Vector3f(0.55f, 0.55f, 0.5f);
+  processor.addFootprint(world_T_body, layer);
+  EXPECT_EQ(num_traversed(layer), 18u);
+  EXPECT_TRUE(traversed_at(layer, -1, 0));  // From the first pose.
+  EXPECT_TRUE(traversed_at(layer, 5, 5));   // From the second pose.
+  EXPECT_FALSE(traversed_at(layer, 3, 3));
+  EXPECT_TRUE(layer.getBlock(BlockIndex(0, 0, 0)).updated);
+  EXPECT_FALSE(layer.getBlock(BlockIndex(-1, -1, 0)).updated);
+
+  // Elongated robot rotated by 90 degrees about z: long axis along world y.
+  config.bbox_min = Eigen::Vector2f(-0.32f, -0.07f);
+  config.bbox_max = Eigen::Vector2f(0.32f, 0.07f);
+  const RobotFootprintTraversability rotated(config);
+  Eigen::Isometry3f rotated_pose = Eigen::Isometry3f::Identity();
+  rotated_pose.linear() =
+      Eigen::AngleAxisf(M_PI / 2.0f, Eigen::Vector3f::UnitZ()).toRotationMatrix();
+  rotated_pose.translation() = Eigen::Vector3f(0.05f, 0.05f, 0.0f);
+  auto rotated_layer = make_layer();
+  rotated.addFootprint(rotated_pose, rotated_layer);
+  // x in [-0.07, 0.17] -> 3 voxels, y in [-0.32, 0.42] -> 7 voxels.
+  EXPECT_EQ(num_traversed(rotated_layer), 21u);
+  EXPECT_TRUE(traversed_at(rotated_layer, 0, 3));
+  EXPECT_TRUE(traversed_at(rotated_layer, 0, -3));
+  EXPECT_FALSE(traversed_at(rotated_layer, 3, 0));
+  EXPECT_FALSE(traversed_at(rotated_layer, 2, 0));
+}
+
+TEST(TraversabilityPlaces, ClassifyTraversed) {
+  struct Estimator : public TraversabilityEstimator {
+    using TraversabilityEstimator::TraversabilityEstimator;
+    void updateTraversability(const ActiveWindowOutput&,
+                              TraversabilityLayer&) override {}
+  };
+
+  TraversabilityEstimator::Config config;
+  config.min_confidence = 0.5f;
+  config.min_traversability = 0.5f;
+  const Estimator estimator(config);
+
+  TraversabilityVoxel voxel;
+  voxel.confidence = 1.0f;
+  voxel.traversability = 0.0f;
+  estimator.classifyTraversabilityVoxel(voxel);
+  EXPECT_EQ(voxel.state, spark_dsg::TraversabilityState::INTRAVERSABLE);
+
+  // Voxels the robot drove over are traversable regardless of the geometric estimate.
+  voxel.traversed = true;
+  estimator.classifyTraversabilityVoxel(voxel);
+  EXPECT_EQ(voxel.state, spark_dsg::TraversabilityState::TRAVERSABLE);
+}
 
 }  // namespace hydra::places

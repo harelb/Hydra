@@ -39,10 +39,12 @@ inline kimera_pgmo::DeformationGraph::Ptr makeRigidDeformationGraph(
     root = nlohmann::json::parse(in);
   }
 
+  // kimera_pgmo serializes control points as control_points.<prefix> =
+  // [{pos, timestamp_ns}] (it only reads the older vertices.{pos,stamps} form when
+  // control_points is missing, and an empty graph saves an empty control_points)
   const std::string prefix_str(1, prefix);
-  auto& vertices = root["vertices"][prefix_str];
-  vertices["pos"] = nlohmann::json::array();
-  vertices["stamps"] = nlohmann::json::array();
+  auto& points = root["control_points"][prefix_str];
+  points = nlohmann::json::array();
   root["values"] = nlohmann::json::array();
   // control points on a small grid so any query has enough neighbors
   size_t index = 0;
@@ -61,8 +63,7 @@ inline kimera_pgmo::DeformationGraph::Ptr makeRigidDeformationGraph(
              {"qx", q.x()},
              {"qy", q.y()},
              {"qz", q.z()}}}});
-      vertices["pos"].push_back({point.x(), point.y(), point.z()});
-      vertices["stamps"].push_back(stamp_ns);
+      points.push_back({{"pos", {point.x(), point.y(), point.z()}}, {"timestamp_ns", stamp_ns}});
       ++index;
     }
   }

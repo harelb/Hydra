@@ -88,7 +88,7 @@ class DsgUpdater {
 
   void save(const DataDirectory& output, const std::string& label) const;
 
-  void resetBackendDsg(uint64_t timestamp_ns);
+  void reset(uint64_t timestamp_ns);
 
   void handleMeshUpdate(uint64_t timestamp_ns,
                         const kimera_pgmo::MeshOffsetInfo& offsets);
@@ -100,15 +100,22 @@ class DsgUpdater {
    */
   void callUpdateFunctions(uint64_t timestamp_ns, UpdateInfo::ConstPtr info);
 
+  void finalize(UpdateInfo::ConstPtr info);
+
  private:
+  void callFunctors(UpdateInfo::ConstPtr info);
+  void markNewNodes();
+  void clearNewNodes();
   void reportMerges();
 
   GroupedMergeTracker merge_tracker;
+  const std::set<std::string> exhaustive_names_;
   //! Merges as of the last report
   std::map<spark_dsg::NodeId, spark_dsg::NodeId> reported_merges_;
   ImageStore::Ptr image_store_;
   std::map<std::string, UpdateFunctor::Ptr> update_functors_;
 
+  std::vector<spark_dsg::NodeId> active_nodes_to_restore_;
   spark_dsg::SceneGraph::Ptr source_graph_;
   SharedDsgInfo::Ptr target_dsg_;
 };

@@ -39,6 +39,7 @@
 #include <config_utilities/validation.h>
 #include <glog/logging.h>
 #include <glog/stl_logging.h>
+#include <kimera_pgmo/deformation_graph_4dof.h>
 #include <kimera_pgmo/mesh_delta.h>
 #include <kimera_pgmo/pcl_mesh_traits.h>
 #include <kimera_pgmo/utils/mesh_io.h>
@@ -92,6 +93,7 @@ inline bool hasLoopClosure(const PoseGraph& graph) {
       return true;
     }
   }
+
   return false;
 }
 
@@ -104,6 +106,7 @@ void declare_config(BackendModule::Config& config) {
   field(config.pgmo, "pgmo");
   field(config.optimize_on_lc, "optimize_on_lc");
   field(config.optimize_every_update, "optimize_every_update");
+  field(config.finalize_on_shutdown, "finalize_on_shutdown");
   field(config.external_loop_closures, "external_loop_closures");
   field(config.optimization_hooks, "optimization_hooks");
   field(config.sinks, "sinks");
@@ -145,6 +148,12 @@ void BackendModule::stopImpl() {
     spin_thread_->join();
     spin_thread_.reset();
     VLOG(2) << "[Hydra Backend] stopped!";
+  }
+
+  if (config.finalize_on_shutdown) {
+    auto info = getUpdateInfo(0);
+    info->full_update = true;
+    dsg_updater_->finalize(info);
   }
 }
 
@@ -259,24 +268,11 @@ bool BackendModule::spinOnce(bool force_update) {
   should_optimize |= force_optimize_;
   if (should_optimize) {
     optimize(timestamp_ns);
+
   } else {
     updateDsgMesh(timestamp_ns);
 
-    UpdateInfo::ConstPtr info;
-    if (have_loopclosures_) {
-      // update graph with cached optimization solution
-      info.reset(new UpdateInfo{timestamp_ns,
-                                deformation_graph_->getTempValues(),
-                                deformation_graph_->getValues(),
-                                false,
-                                {},
-                                deformation_graph_.get(),
-                                nullptr,
-                                mesh_offsets_});
-    } else {
-      info.reset(new UpdateInfo{timestamp_ns});
-    }
-
+    auto info = getUpdateInfo(timestamp_ns);
     dsg_updater_->callUpdateFunctions(timestamp_ns, info);
   }
 
@@ -285,6 +281,25 @@ bool BackendModule::spinOnce(bool force_update) {
   ScopedTimer sink_timer("backend/sinks", timestamp_ns);
   Sink::callAll(sinks_, timestamp_ns, *private_dsg_->graph, *deformation_graph_);
   return true;
+}
+
+UpdateInfo::Ptr BackendModule::getUpdateInfo(uint64_t timestamp_ns) {
+  UpdateInfo::Ptr info;
+  if (have_loopclosures_) {
+    // update graph with cached optimization solution
+    info.reset(new UpdateInfo{timestamp_ns,
+                              &extra_estimates_,
+                              deformation_graph_->getValues(),
+                              false,
+                              {},
+                              deformation_graph_.get(),
+                              nullptr,
+                              mesh_offsets_});
+  } else {
+    info.reset(new UpdateInfo{timestamp_ns});
+  }
+
+  return info;
 }
 
 void BackendModule::loadState(const std::filesystem::path& mesh_path,
@@ -367,6 +382,7 @@ void BackendModule::updateFactorGraph(const FrontendOutput& input) {
       LOG(INFO) << "[Hydra Backend] Input pose graph has loop closure @ "
                 << msg.stamp_ns << " [ns]";
     }
+
     processIncrementalPoseGraph(
         msg, inc_mesh_indices, inc_mesh_index_stamps, trajectory_, timestamps_);
     logIncrementalLoopClosures(msg);
@@ -495,7 +511,6 @@ void BackendModule::updateDsgMesh(size_t timestamp_ns, bool force_mesh_update) {
   deformation_graph_->deformPoints(*private_dsg_->graph->mesh(),
                                    original_vertices_,
                                    GlobalInfo::instance().getRobotPrefix().vertex_key,
-                                   *deformation_graph_->getValues(),
                                    KimeraPgmoInterface::config_.num_interp_pts,
                                    KimeraPgmoInterface::config_.interp_horizon,
                                    last_deformed_vertices_);
@@ -511,32 +526,41 @@ void BackendModule::updateAgentNodeMeasurements(const PoseGraph& meas) {
         {gtsam::Symbol(GlobalInfo::instance().getRobotPrefix().key, node.key),
          gtsam::Pose3(node.pose.matrix())});
   }
+
   deformation_graph_->processNodeMeasurements(agent_measurements);
 }
 
 void BackendModule::optimize(size_t timestamp_ns, bool force_find_merge) {
+  kimera_pgmo::OptimizationProblem extras;
   for (const auto& hook : optimization_hooks_) {
     if (!hook) {
       continue;
     }
 
-    hook->updateProblem(timestamp_ns, *unmerged_graph_, *deformation_graph_);
+    hook->updateProblem(timestamp_ns, *unmerged_graph_, *deformation_graph_, extras);
+  }
+
+  if (KimeraPgmoInterface::config_.use_4dof_optim) {
+    auto [factors, initial] =
+        kimera_pgmo::convertGraphToPose4DoF(extras.factors, extras.initial);
+    extras.factors = std::move(factors);
+    extras.initial = std::move(initial);
   }
 
   ScopedTimer timer("backend/optimization", timestamp_ns, true, 0, false);
-  KimeraPgmoInterface::optimize();
+  kimera_pgmo::OptimizationResult result;
+  KimeraPgmoInterface::optimize(extras, &result);
+  extra_estimates_ = kimera_pgmo::convertPose4DoFToPose3(result.extra_estimates);
   timer.stop();
 
   updateDsgMesh(timestamp_ns);
 
-  UpdateInfo::ConstPtr info(new UpdateInfo{timestamp_ns,
-                                           deformation_graph_->getTempValues(),
-                                           deformation_graph_->getValues(),
-                                           have_new_loopclosures_ || force_find_merge,
-                                           {},
-                                           deformation_graph_.get(),
-                                           nullptr,
-                                           mesh_offsets_});
+  if (config.reset_dsg_on_loop_closure && have_new_loopclosures_) {
+    dsg_updater_->reset(timestamp_ns);
+  }
+
+  auto info = getUpdateInfo(timestamp_ns);
+  info->full_update = have_new_loopclosures_ || force_find_merge;
   dsg_updater_->callUpdateFunctions(timestamp_ns, info);
   have_new_loopclosures_ = false;
 }
