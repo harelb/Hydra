@@ -1,5 +1,6 @@
 """Pure-python access to the Hydra image store (see README.md)."""
 
+from .check import check_store
 from .codec import (
     LEGACY_TRACK_BASE,
     SAM3_TRACK_BASE,
@@ -15,7 +16,6 @@ from .codec import (
     sam3_track_id,
     transform_to_blob,
 )
-from .pack import check_store, pack_store, unpack_store
 from .poses import JsonDsg, as_pose_lookup, load_dsg
 from .sessions import Session, list_sessions
 from .store import (
@@ -54,11 +54,9 @@ __all__ = [
     "make_node_id",
     "node_label",
     "node_symbol",
-    "pack_store",
     "rle_decode",
     "rle_encode",
     "sam3_track_id",
     "schema_sql",
     "transform_to_blob",
-    "unpack_store",
 ]
