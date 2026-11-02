@@ -248,6 +248,13 @@ void GraphBuilder::spin() {
     // wait for current spin to finish before shutting down
     std::this_thread::sleep_for(10ms);
   }
+
+  // The last (collated) packet arrived while a spin was still running. On a normal
+  // stop it is processed so that its data (e.g., the final agent nodes) reaches the
+  // graph; a forced shutdown drops it.
+  if (input && !GlobalInfo::instance().force_shutdown()) {
+    spinOnce(input);
+  }
 }
 
 bool GraphBuilder::spinOnce() {
