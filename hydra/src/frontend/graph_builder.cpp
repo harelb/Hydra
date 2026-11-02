@@ -268,8 +268,10 @@ void GraphBuilder::spin() {
     std::this_thread::sleep_for(10ms);
   }
 
-  if (input) {
-    // the last (collated) packet arrived while a spin was still running
+  // The last (collated) packet arrived while a spin was still running. It used to be
+  // dropped on a normal stop; it is processed so that the final frames get their
+  // agent nodes (and anchors). A forced shutdown still drops it.
+  if (input && !GlobalInfo::instance().force_shutdown()) {
     spinOnce(input);
   }
 }
