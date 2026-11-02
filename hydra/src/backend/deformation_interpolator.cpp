@@ -150,18 +150,26 @@ NodeCache::Entry* NodeCache::add(NodeId node_id, const NodeAttributes& attrs) {
                                attrs.position.cast<float>(),
                                bbox,
                                getOrientation(attrs),
-                               std::nullopt})
+                               std::nullopt,
+                               attrs.is_active})
                 .first->second;
   }
 
-  // archived nodes hold the deformed values written by the interpolator, so the
-  // cached odometric values are only refreshed while the node is active
-  if (attrs.is_active) {
+  // Archived nodes hold the deformed values written by the interpolator, so the
+  // cached odometric values are only refreshed while the node is active. The
+  // frontend also overwrites the attributes of a node in the update that archives it
+  // (but never those of a node that was already archived, see
+  // GraphMergeConfig::update_archived_attributes), so with refresh_on_archive the
+  // first archived attributes after an active pass are odometric and are cached too.
+  const bool archiving_update = refresh_on_archive && iter->second.was_active;
+  if (attrs.is_active || archiving_update) {
     iter->second.init_pos = attrs.position.cast<float>();
     iter->second.timestamp = timestamp_ns;
     iter->second.init_bbox = bbox;
     iter->second.init_rot = getOrientation(attrs);
   }
+
+  iter->second.was_active = attrs.is_active;
 
   return &iter->second;
 }
@@ -208,8 +216,11 @@ uint64_t pgmoGetVertexStamp(const EntryList& entries, size_t i) {
   return entries.entries[i]->timestamp;
 }
 
-DeformationInterpolator::DeformationInterpolator(const Config& config)
-    : config(config::checkValid(config)) {}
+DeformationInterpolator::DeformationInterpolator(const Config& config,
+                                                 bool refresh_on_archive)
+    : config(config::checkValid(config)) {
+  cache_.refresh_on_archive = refresh_on_archive;
+}
 
 void DeformationInterpolator::interpolate(const SceneGraph& unmerged,
                                           SceneGraph& dsg,

@@ -56,6 +56,8 @@ struct NodeCache {
     std::optional<Eigen::Quaterniond> init_rot;
     //! Most recent odometric to optimized transform applied to the node, if any
     std::optional<Eigen::Isometry3d> last_transform;
+    //! Whether the node was active when the cache last saw it
+    bool was_active = false;
 
     /**
      * @brief Write the cached odometric pose of the node transformed by the provided
@@ -80,6 +82,9 @@ struct NodeCache {
                           spark_dsg::NodeAttributes& attrs) const;
 
   std::map<spark_dsg::NodeId, Entry> nodes;
+  //! Also refresh the cached odometric values from the update that archives a node
+  //! (see add)
+  bool refresh_on_archive = false;
 };
 
 /**
@@ -95,7 +100,16 @@ class DeformationInterpolator {
     double control_point_tolerance_s = 10.0;
   } const config;
 
-  explicit DeformationInterpolator(const Config& config);
+  /**
+   * @brief Construct the interpolator.
+   * @param config Interpolator settings.
+   * @param refresh_on_archive Also take the odometric pose of a node from the
+   * frontend update that archives it (by default only active nodes refresh the cache).
+   * Only valid if every node in the views passed to interpolate stops receiving
+   * frontend updates once archived (the backend default).
+   */
+  explicit DeformationInterpolator(const Config& config,
+                                   bool refresh_on_archive = false);
 
   /**
    * @brief Interpolate the node poses based on the deformation graph, using the
