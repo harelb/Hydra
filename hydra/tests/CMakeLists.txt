@@ -12,6 +12,7 @@ add_executable(
   eval/test_evaluation.cpp
   src/resources.cpp
   backend/test_deformation_interpolator.cpp
+  backend/test_dsg_updater.cpp
   backend/test_external_loop_closure.cpp
   backend/test_merge_tracker.cpp
   backend/test_mst_factors.cpp
