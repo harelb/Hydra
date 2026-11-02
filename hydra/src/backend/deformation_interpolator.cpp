@@ -61,6 +61,26 @@ std::string printTransform(const Eigen::Isometry3d& tf) {
   return ss.str();
 }
 
+std::optional<Eigen::Quaterniond> getOrientation(const NodeAttributes& attrs) {
+  if (const auto object = dynamic_cast<const ObjectNodeAttributes*>(&attrs)) {
+    return object->world_R_object;
+  }
+
+  if (const auto agent = dynamic_cast<const AgentNodeAttributes*>(&attrs)) {
+    return agent->world_R_body;
+  }
+
+  return std::nullopt;
+}
+
+void setOrientation(NodeAttributes& attrs, const Eigen::Quaterniond& rotation) {
+  if (auto object = dynamic_cast<ObjectNodeAttributes*>(&attrs)) {
+    object->world_R_object = rotation;
+  } else if (auto agent = dynamic_cast<AgentNodeAttributes*>(&attrs)) {
+    agent->world_R_body = rotation;
+  }
+}
+
 }  // namespace
 
 using spark_dsg::BoundingBox;
@@ -78,16 +98,27 @@ void declare_config(DeformationInterpolator::Config& config) {
 
 void NodeCache::Entry::update(NodeAttributes& attrs,
                               const Eigen::Isometry3d& transform) const {
-  const auto new_pos = transform * init_pos.cast<double>();
-  attrs.position = new_pos;
-  if (init_bbox.type == BoundingBox::Type::INVALID) {
-    return;
+  // reset every spatial field to the odometric value before transforming so that
+  // repeated deformation of a node never compounds
+  attrs.position = init_pos.cast<double>();
+  if (init_rot) {
+    setOrientation(attrs, *init_rot);
   }
 
-  auto derived = dynamic_cast<SemanticNodeAttributes*>(&attrs);
-  if (derived) {
-    derived->bounding_box = init_bbox;
-    derived->bounding_box.transform(transform);
+  auto semantic = dynamic_cast<SemanticNodeAttributes*>(&attrs);
+  std::optional<BoundingBox> unchanged_bbox;
+  if (semantic) {
+    if (init_bbox.type == BoundingBox::Type::INVALID) {
+      unchanged_bbox = semantic->bounding_box;
+    } else {
+      semantic->bounding_box = init_bbox;
+    }
+  }
+
+  attrs.transform(transform);
+  if (unchanged_bbox) {
+    // there is no odometric bounding box to deform
+    semantic->bounding_box = *unchanged_bbox;
   }
 }
 
@@ -113,19 +144,44 @@ NodeCache::Entry* NodeCache::add(NodeId node_id, const NodeAttributes& attrs) {
   auto iter = nodes.find(node_id);
   if (iter == nodes.end()) {
     return &nodes
-                .emplace(
-                    node_id,
-                    Entry{node_id, timestamp_ns, attrs.position.cast<float>(), bbox})
+                .emplace(node_id,
+                         Entry{node_id,
+                               timestamp_ns,
+                               attrs.position.cast<float>(),
+                               bbox,
+                               getOrientation(attrs),
+                               std::nullopt,
+                               attrs.is_active})
                 .first->second;
   }
 
-  if (attrs.is_active) {
+  // Archived nodes hold the deformed values written by the interpolator, so the
+  // cached odometric values are only refreshed while the node is active. The
+  // frontend also overwrites the attributes of a node in the update that archives it
+  // (but never those of a node that was already archived, see
+  // GraphMergeConfig::update_archived_attributes), so with refresh_on_archive the
+  // first archived attributes after an active pass are odometric and are cached too.
+  const bool archiving_update = refresh_on_archive && iter->second.was_active;
+  if (attrs.is_active || archiving_update) {
     iter->second.init_pos = attrs.position.cast<float>();
     iter->second.timestamp = timestamp_ns;
     iter->second.init_bbox = bbox;
+    iter->second.init_rot = getOrientation(attrs);
   }
 
+  iter->second.was_active = attrs.is_active;
+
   return &iter->second;
+}
+
+bool NodeCache::applyLastTransform(NodeId node_id, NodeAttributes& attrs) const {
+  const auto iter = nodes.find(node_id);
+  if (iter == nodes.end() || !iter->second.last_transform) {
+    return false;
+  }
+
+  iter->second.update(attrs, *iter->second.last_transform);
+  return true;
 }
 
 struct EntryList {
@@ -160,8 +216,11 @@ uint64_t pgmoGetVertexStamp(const EntryList& entries, size_t i) {
   return entries.entries[i]->timestamp;
 }
 
-DeformationInterpolator::DeformationInterpolator(const Config& config)
-    : config(config::checkValid(config)) {}
+DeformationInterpolator::DeformationInterpolator(const Config& config,
+                                                 bool refresh_on_archive)
+    : config(config::checkValid(config)) {
+  cache_.refresh_on_archive = refresh_on_archive;
+}
 
 void DeformationInterpolator::interpolate(const SceneGraph& unmerged,
                                           SceneGraph& dsg,
@@ -216,6 +275,9 @@ void DeformationInterpolator::interpolate(const SceneGraph& unmerged,
       VLOG(5) << "node " << spark_dsg::NodeSymbol(entry->id).str()
               << " -> transform: " << printTransform(transform);
 
+      // recorded so that attributes rebuilt later (e.g., by merge hooks) can be
+      // brought into the optimized frame
+      entry->last_transform = transform;
       entry->update(unmerged.getNode(entry->id).attributes(), transform);
       auto node_ptr = dsg.findNode(entry->id);
       if (!node_ptr) {

@@ -36,6 +36,8 @@
 #include <spark_dsg/bounding_box.h>
 #include <spark_dsg/layer_view.h>
 
+#include <optional>
+
 #include "hydra/backend/update_functions.h"
 
 namespace hydra {
@@ -50,14 +52,39 @@ struct NodeCache {
     Eigen::Vector3f init_pos;
     //! Odometric bounding box for node
     spark_dsg::BoundingBox init_bbox;
+    //! Odometric orientation for nodes that have one (objects and agents)
+    std::optional<Eigen::Quaterniond> init_rot;
+    //! Most recent odometric to optimized transform applied to the node, if any
+    std::optional<Eigen::Isometry3d> last_transform;
+    //! Whether the node was active when the cache last saw it
+    bool was_active = false;
 
+    /**
+     * @brief Write the cached odometric pose of the node transformed by the provided
+     * transform into the attributes.
+     *
+     * The spatial fields (position, bounding box and orientation) are reset to the
+     * cached odometric values before NodeAttributes::transform is applied, so
+     * repeated application never compounds. Other fields are left untouched.
+     */
     void update(spark_dsg::NodeAttributes& attrs,
                 const Eigen::Isometry3d& transform) const;
   };
 
   Entry* add(spark_dsg::NodeId node, const spark_dsg::NodeAttributes& attrs);
 
+  /**
+   * @brief Apply the most recent deformation of a node to the provided attributes
+   * (see Entry::update).
+   * @returns True if the node has a recorded deformation that was applied.
+   */
+  bool applyLastTransform(spark_dsg::NodeId node,
+                          spark_dsg::NodeAttributes& attrs) const;
+
   std::map<spark_dsg::NodeId, Entry> nodes;
+  //! Also refresh the cached odometric values from the update that archives a node
+  //! (see add)
+  bool refresh_on_archive = false;
 };
 
 /**
@@ -73,11 +100,23 @@ class DeformationInterpolator {
     double control_point_tolerance_s = 10.0;
   } const config;
 
-  explicit DeformationInterpolator(const Config& config);
+  /**
+   * @brief Construct the interpolator.
+   * @param config Interpolator settings.
+   * @param refresh_on_archive Also take the odometric pose of a node from the
+   * frontend update that archives it (by default only active nodes refresh the cache).
+   * Only valid if every node in the views passed to interpolate stops receiving
+   * frontend updates once archived (the backend default).
+   */
+  explicit DeformationInterpolator(const Config& config,
+                                   bool refresh_on_archive = false);
 
   /**
-   * @brief Interpolate the node positions based on the deformation graph, using the
+   * @brief Interpolate the node poses based on the deformation graph, using the
    * temporally closest control points as reference.
+   *
+   * Positions, bounding boxes and orientations are recomputed from the odometric
+   * values cached while the node is active and written into both graphs.
    *
    * @param unmerged Unmerged scene graph to keep up to date.
    * @param dsg Private DSG to update.
@@ -103,6 +142,22 @@ class DeformationInterpolator {
                                 const UpdateInfo::ConstPtr& info,
                                 const spark_dsg::LayerView& view) const {
     interpolate(unmerged, dsg, info, view);
+  }
+
+  /**
+   * @brief Apply the most recent deformation of a node to attributes rebuilt outside
+   * of the interpolator (e.g., by a merge hook) so that they match the optimized frame.
+   * Only the spatial fields are written, and they are derived from the cached
+   * odometric values, so this is safe to call on attributes that were already
+   * deformed.
+   *
+   * @param node Node that the attributes belong to.
+   * @param attrs Attributes to update.
+   * @returns True if the node has a recorded deformation that was applied.
+   */
+  bool applyLastTransform(spark_dsg::NodeId node,
+                          spark_dsg::NodeAttributes& attrs) const {
+    return cache_.applyLastTransform(node, attrs);
   }
 
  private:

@@ -38,6 +38,7 @@
 #include <spark_dsg/node_symbol.h>
 #include <spark_dsg/scene_graph.h>
 
+#include "hydra_test/rigid_deformation.h"
 #include "hydra_test/shared_dsg_fixture.h"
 
 using namespace spark_dsg;
@@ -195,6 +196,205 @@ TEST(UpdateObjectsFunctor, ObjectUpdateMergeNoLC) {
 
   MergeList expected{{1, 0}};
   EXPECT_EQ(result_merges, expected);
+}
+
+// The geometry comes from the optimized mesh, but the orientation can only come from
+// the deformation graph.
+TEST(UpdateObjectsFunctor, ObjectOrientationDeformed) {
+  Eigen::Isometry3d transform = Eigen::Isometry3d::Identity();
+  transform.linear() = Eigen::AngleAxisd(M_PI / 2.0, Eigen::Vector3d::UnitZ()).matrix();
+  transform.translation() << 1.0, 0.0, 0.0;
+  const Eigen::Quaterniond odom_rot(Eigen::AngleAxisd(0.25, Eigen::Vector3d::UnitX()));
+  const Eigen::Matrix3d expected_rot = transform.linear() * odom_rot.toRotationMatrix();
+
+  auto make_attrs = [&](const Eigen::Vector3d& pos) {
+    auto attrs = std::make_unique<ObjectNodeAttributes>();
+    attrs->position = pos;
+    attrs->world_R_object = odom_rot;
+    attrs->bounding_box.type = BoundingBox::Type::AABB;
+    attrs->bounding_box.world_P_center = pos.cast<float>();
+    attrs->semantic_label = 1u;
+    attrs->mesh_connections = {0, 1};
+    attrs->is_active = true;
+    attrs->last_update_time_ns = 10u;
+    return attrs;
+  };
+
+  auto unmerged = test::makeSharedDsg()->graph;
+  auto dsg = test::makeSharedDsg();
+  for (const auto node_id : {0, 1}) {
+    unmerged->emplaceNode(DsgLayers::OBJECTS, node_id, make_attrs({1.0, 1.0, 0.0}));
+    dsg->graph->emplaceNode(DsgLayers::OBJECTS, node_id, make_attrs({1.0, 1.0, 0.0}));
+  }
+
+  // the "optimized" mesh
+  auto mesh = std::make_shared<Mesh>();
+  mesh->resizeVertices(2);
+  mesh->setPos(0, Mesh::Pos(-1.0, -2.0, -3.0));
+  mesh->setPos(1, Mesh::Pos(1.0, 2.0, 3.0));
+  dsg->graph->setMesh(mesh);
+  unmerged->setMesh(mesh);
+
+  auto dgraph = test::makeRigidDeformationGraph(transform);
+  UpdateInfo::ConstPtr info(
+      new UpdateInfo{0, nullptr, nullptr, true, {}, dgraph.get()});
+  UpdateObjectsFunctor::Config config;
+  config.deform_object_poses = true;
+  UpdateObjectsFunctor functor(config);
+
+  for (size_t round = 0; round < 3; ++round) {
+    if (round == 1) {
+      // the frontend update that archives the nodes replaces their attributes with
+      // odometric ones
+      for (const auto node_id : {0, 1}) {
+        auto archived = make_attrs({1.0, 1.0, 0.0});
+        archived->is_active = false;
+        unmerged->setNodeAttributes(node_id, std::move(archived));
+      }
+    }
+    // in round 2, the archived nodes are no longer refreshed by the frontend and keep
+    // the deformed values; deforming them again must not compound
+
+    functor.call(*unmerged, *dsg, info);
+    for (const auto graph : {unmerged.get(), dsg->graph.get()}) {
+      const auto& result = graph->getNode(0).attributes<ObjectNodeAttributes>();
+      EXPECT_TRUE(
+          result.world_R_object.toRotationMatrix().isApprox(expected_rot, 1.0e-6))
+          << "round " << round;
+      // geometry is computed from the mesh, not from the deformation graph
+      EXPECT_NEAR(result.position.norm(), 0.0, 1.0e-6) << "round " << round;
+      EXPECT_TRUE(
+          result.bounding_box.dimensions.isApprox(Eigen::Vector3f(2.0, 4.0, 6.0)))
+          << "round " << round;
+    }
+  }
+
+  // merged attributes get the same orientation
+  const auto hooks = functor.hooks();
+  ASSERT_TRUE(hooks.merge);
+  auto odom = make_attrs({1.0, 1.0, 0.0});
+  unmerged->setNodeAttributes(0, std::move(odom));
+  const auto merged = hooks.merge(*unmerged, {0, 1});
+  ASSERT_TRUE(merged);
+  const auto& merged_attrs = dynamic_cast<const ObjectNodeAttributes&>(*merged);
+  EXPECT_TRUE(
+      merged_attrs.world_R_object.toRotationMatrix().isApprox(expected_rot, 1.0e-6));
+  EXPECT_NEAR(merged_attrs.position.norm(), 0.0, 1.0e-6);
+}
+
+// Without deform_object_poses, objects behave as before: objects without
+// mesh connections keep their frontend pose and orientations are never deformed,
+// including in the merge hook.
+TEST(UpdateObjectsFunctor, ObjectPoseNotDeformedByDefault) {
+  Eigen::Isometry3d transform = Eigen::Isometry3d::Identity();
+  transform.linear() = Eigen::AngleAxisd(M_PI / 2.0, Eigen::Vector3d::UnitZ()).matrix();
+  transform.translation() << 1.0, 0.0, 0.0;
+  const Eigen::Quaterniond odom_rot(Eigen::AngleAxisd(0.25, Eigen::Vector3d::UnitX()));
+  const Eigen::Vector3d odom_pos(1.0, 1.0, 0.0);
+
+  auto make_attrs = [&](bool with_mesh) {
+    auto attrs = std::make_unique<ObjectNodeAttributes>();
+    attrs->position = odom_pos;
+    attrs->world_R_object = odom_rot;
+    attrs->bounding_box.type = BoundingBox::Type::AABB;
+    attrs->bounding_box.world_P_center = odom_pos.cast<float>();
+    attrs->semantic_label = 1u;
+    if (with_mesh) {
+      attrs->mesh_connections = {0, 1};
+    }
+    attrs->is_active = false;
+    attrs->last_update_time_ns = 10u;
+    return attrs;
+  };
+
+  auto unmerged = test::makeSharedDsg()->graph;
+  auto dsg = test::makeSharedDsg();
+  // node 0 has no mesh connections, node 1 does
+  for (const auto node_id : {0, 1}) {
+    unmerged->emplaceNode(DsgLayers::OBJECTS, node_id, make_attrs(node_id == 1));
+    dsg->graph->emplaceNode(DsgLayers::OBJECTS, node_id, make_attrs(node_id == 1));
+  }
+
+  auto mesh = std::make_shared<Mesh>();
+  mesh->resizeVertices(2);
+  mesh->setPos(0, Mesh::Pos(-1.0, -2.0, -3.0));
+  mesh->setPos(1, Mesh::Pos(1.0, 2.0, 3.0));
+  dsg->graph->setMesh(mesh);
+  unmerged->setMesh(mesh);
+
+  auto dgraph = test::makeRigidDeformationGraph(transform);
+  UpdateInfo::ConstPtr info(
+      new UpdateInfo{0, nullptr, nullptr, true, {}, dgraph.get()});
+  UpdateObjectsFunctor functor(UpdateObjectsFunctor::Config{});
+  ASSERT_FALSE(functor.config.deform_object_poses);
+  functor.call(*unmerged, *dsg, info);
+
+  for (const auto graph : {unmerged.get(), dsg->graph.get()}) {
+    const auto& empty = graph->getNode(0).attributes<ObjectNodeAttributes>();
+    EXPECT_TRUE(empty.position.isApprox(odom_pos));
+    EXPECT_TRUE(empty.bounding_box.world_P_center.isApprox(odom_pos.cast<float>()));
+    EXPECT_TRUE(empty.world_R_object.isApprox(odom_rot));
+  }
+
+  // geometry still comes from the mesh, but the orientation is untouched
+  const auto& meshed = dsg->graph->getNode(1).attributes<ObjectNodeAttributes>();
+  EXPECT_NEAR(meshed.position.norm(), 0.0, 1.0e-6);
+  EXPECT_TRUE(meshed.world_R_object.isApprox(odom_rot));
+
+  const auto hooks = functor.hooks();
+  ASSERT_TRUE(hooks.merge);
+  const auto merged = hooks.merge(*unmerged, {0, 1});
+  ASSERT_TRUE(merged);
+  const auto& merged_attrs = dynamic_cast<const ObjectNodeAttributes&>(*merged);
+  EXPECT_TRUE(merged_attrs.world_R_object.isApprox(odom_rot));
+  EXPECT_NEAR(merged_attrs.position.norm(), 0.0, 1.0e-6);
+}
+
+// With deform_object_poses, the frontend update that archives an object (and so
+// changes its pose for the last time) replaces the cached odometric pose.
+TEST(UpdateObjectsFunctor, ArchivingUpdateRefreshesOdometricPose) {
+  Eigen::Isometry3d transform = Eigen::Isometry3d::Identity();
+  transform.translation() << 1.0, 0.0, 0.0;
+
+  auto make_attrs = [&](const Eigen::Vector3d& pos, bool active) {
+    auto attrs = std::make_unique<ObjectNodeAttributes>();
+    attrs->position = pos;
+    attrs->semantic_label = 1u;
+    attrs->is_active = active;
+    attrs->last_update_time_ns = 10u;
+    return attrs;
+  };
+
+  auto unmerged = test::makeSharedDsg()->graph;
+  auto dsg = test::makeSharedDsg();
+  unmerged->emplaceNode(DsgLayers::OBJECTS, 0, make_attrs({1.0, 0.0, 0.0}, true));
+  dsg->graph->emplaceNode(DsgLayers::OBJECTS, 0, make_attrs({1.0, 0.0, 0.0}, true));
+  dsg->graph->setMesh(std::make_shared<Mesh>());
+
+  auto dgraph = test::makeRigidDeformationGraph(transform);
+  UpdateInfo::ConstPtr info(
+      new UpdateInfo{0, nullptr, nullptr, true, {}, dgraph.get()});
+  UpdateObjectsFunctor::Config config;
+  config.deform_object_poses = true;
+  UpdateObjectsFunctor functor(config);
+  functor.call(*unmerged, *dsg, info);
+  EXPECT_TRUE(unmerged->getNode(0).attributes().position.isApprox(
+      Eigen::Vector3d(2.0, 0.0, 0.0)));
+
+  // the frontend moves the object while archiving it
+  unmerged->setNodeAttributes(0, make_attrs({3.0, 0.0, 0.0}, false));
+  functor.call(*unmerged, *dsg, info);
+  for (const auto graph : {unmerged.get(), dsg->graph.get()}) {
+    EXPECT_TRUE(graph->getNode(0).attributes().position.isApprox(
+        Eigen::Vector3d(4.0, 0.0, 0.0)));
+  }
+
+  // the archived node now holds deformed values that must not be cached
+  functor.call(*unmerged, *dsg, info);
+  for (const auto graph : {unmerged.get(), dsg->graph.get()}) {
+    EXPECT_TRUE(graph->getNode(0).attributes().position.isApprox(
+        Eigen::Vector3d(4.0, 0.0, 0.0)));
+  }
 }
 
 }  // namespace hydra

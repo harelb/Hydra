@@ -36,6 +36,7 @@
 #include <config_utilities/virtual_config.h>
 
 #include "hydra/backend/association_strategies.h"
+#include "hydra/backend/deformation_interpolator.h"
 #include "hydra/backend/update_functions.h"
 #include "hydra/utils/active_window_tracker.h"
 #include "hydra/utils/logging.h"
@@ -55,6 +56,13 @@ struct UpdateObjectsFunctor : public UpdateFunctor {
     bool allow_connection_merging = true;
     //! Association strategy for finding matches to active nodes
     MergeProposer::Config merge_proposer = {AssociationConfig{SemanticAssociation{}}};
+    //! Deform the full pose of objects (orientation, and the position and bounding
+    //! box of objects without mesh connections) via the deformation graph so that
+    //! e.g. world_R_object follows loop closures. Off keeps the frontend pose of
+    //! objects without mesh connections and never touches the orientation.
+    bool deform_object_poses = false;
+    //! Settings for deforming object poses (only used if deform_object_poses is set)
+    DeformationInterpolator::Config deformation_interpolator = {};
   } const config;
 
   explicit UpdateObjectsFunctor(const Config& config);
@@ -78,6 +86,7 @@ struct UpdateObjectsFunctor : public UpdateFunctor {
   mutable std::set<spark_dsg::NodeId> merged_nodes_;
   mutable ActiveWindowTracker active_tracker;
   const MergeProposer merge_proposer;
+  const DeformationInterpolator deformation_interpolator;
 };
 
 void declare_config(UpdateObjectsFunctor::Config& config);
