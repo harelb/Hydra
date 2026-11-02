@@ -359,10 +359,22 @@ ImageStore::Impl::~Impl() {
   // connection to close checkpoints the write-ahead log)
 }
 
-void ImageStore::Impl::initDatabase() {
-  sqlite3_busy_timeout(db, 5000);
-  exec(db, image_store::kSchema);
-  exec(db, "PRAGMA synchronous = NORMAL;");
+namespace {
+
+//! Throw unless the store has the supported schema version (a store without a meta
+//! table is only accepted if allow_missing is set)
+void checkSchemaVersion(sqlite3* db, bool allow_missing) {
+  {
+    Statement meta(
+        db, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'");
+    if (!meta.step()) {
+      if (allow_missing) {
+        return;
+      }
+
+      throw std::runtime_error("image store has no meta table");
+    }
+  }
 
   Statement version(db, "SELECT value FROM meta WHERE key = 'schema_version'");
   if (!version.step()) {
@@ -370,11 +382,23 @@ void ImageStore::Impl::initDatabase() {
   }
 
   const auto value = version.text(0);
-  if (value != std::to_string(kSchemaVersion)) {
+  if (value != std::to_string(ImageStore::kSchemaVersion)) {
     throw std::runtime_error("image store schema version " + value +
                              " is not supported (expected " +
-                             std::to_string(kSchemaVersion) + ")");
+                             std::to_string(ImageStore::kSchemaVersion) + ")");
   }
+}
+
+}  // namespace
+
+void ImageStore::Impl::initDatabase() {
+  sqlite3_busy_timeout(db, 5000);
+  // an existing store is checked before the schema (tables, indices and the journal
+  // mode) is applied, so that a store of another version is never modified
+  checkSchemaVersion(db, true);
+  exec(db, image_store::kSchema);
+  exec(db, "PRAGMA synchronous = NORMAL;");
+  checkSchemaVersion(db, false);
 }
 
 namespace {

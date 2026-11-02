@@ -773,6 +773,33 @@ TEST(ImageStore, RejectsOtherSchemaVersion) {
   EXPECT_FALSE(ImageStore::open(tmp.path));
 }
 
+// A store of another schema version is rejected before the schema touches it
+TEST(ImageStore, OtherSchemaVersionIsNotModified) {
+  test::TempDirectory tmp;
+  ASSERT_TRUE(ImageStore::open(tmp.path));  // created and closed again
+  sqlite3* db = nullptr;
+  ASSERT_EQ(sqlite3_open((tmp.path / "store.sqlite").c_str(), &db), SQLITE_OK);
+  // e.g., a newer store that dropped a table and does not use a write-ahead log
+  ASSERT_EQ(sqlite3_exec(db,
+                         "PRAGMA journal_mode = DELETE; DROP TABLE node_aliases; "
+                         "UPDATE meta SET value = '99' WHERE key = 'schema_version'",
+                         nullptr,
+                         nullptr,
+                         nullptr),
+            SQLITE_OK);
+  sqlite3_close(db);
+
+  EXPECT_FALSE(ImageStore::open(tmp.path));
+  EXPECT_EQ(test::queryValue(tmp.path, "PRAGMA journal_mode"), "delete");
+  EXPECT_EQ(test::queryValue(tmp.path,
+                             "SELECT COUNT(*) FROM sqlite_master WHERE name = "
+                             "'node_aliases'"),
+            "0");
+  EXPECT_EQ(
+      test::queryValue(tmp.path, "SELECT value FROM meta WHERE key = 'schema_version'"),
+      "99");
+}
+
 // A store left by an earlier session is moved to sessions/<k> with its scene graph
 TEST(ImageStore, RotatesEarlierSession) {
   test::TempDirectory tmp;
