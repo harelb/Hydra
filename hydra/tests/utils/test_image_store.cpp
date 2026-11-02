@@ -842,6 +842,58 @@ TEST(ImageStore, RecoversAfterFailedQuery) {
             "100,300");
 }
 
+// Frames whose images exceed max_queue_mb are recorded without images instead of
+// blocking the producer; every other operation is kept
+TEST(ImageStore, QueueByteBoundDropsImagesOnly) {
+  test::TempDirectory tmp;
+  ImageStore::Config config;
+  config.path = tmp.path;
+  config.max_queue_mb = 1;
+  config.write_depth = false;
+  auto store = ImageStore::open(config);
+  ASSERT_TRUE(store);
+  const auto sensor = store->addSensor(0, "camera", makeCalib());
+  store->flush();
+
+  // another writer holds the write lock, so queued work stays in the queue
+  sqlite3* db = nullptr;
+  ASSERT_EQ(sqlite3_open((tmp.path / "store.sqlite").c_str(), &db), SQLITE_OK);
+  ASSERT_EQ(sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
+
+  // ~1.08 MiB each: the first frame always fits, the second exceeds the bound
+  const cv::Mat large(600, 600, CV_8UC3, cv::Scalar(10, 20, 30));
+  const auto first =
+      store->addFrame(makeFrame(sensor, 100, ImageStore::FrameKind::Keyframe), large);
+  const auto second =
+      store->addFrame(makeFrame(sensor, 200, ImageStore::FrameKind::Keyframe), large);
+  store->bindTrack(0, 1, NodeSymbol('O', 1));
+  store->setAnchor(second, NodeSymbol('a', 1), Eigen::Isometry3d::Identity());
+
+  ASSERT_EQ(sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr), SQLITE_OK);
+  sqlite3_close(db);
+  store->flush();
+
+  EXPECT_EQ(test::queryValue(
+                tmp.path, "SELECT rgb_path FROM frames WHERE frame_id = " + id(first)),
+            "frames/r0/100_rgb.jpg");
+  EXPECT_EQ(test::queryValue(
+                tmp.path, "SELECT rgb_path FROM frames WHERE frame_id = " + id(second)),
+            "NULL");
+  EXPECT_FALSE(fs::exists(tmp.path / "frames/r0/200_rgb.jpg"));
+  EXPECT_EQ(
+      test::queryValue(
+          tmp.path, "SELECT anchor_node_id FROM frames WHERE frame_id = " + id(second)),
+      id(NodeSymbol('a', 1)));
+  EXPECT_EQ(count(tmp.path, "track_bindings"), "1");
+
+  // the queue is empty again: the images of the dropped frame can still be added
+  store->addFrame(makeFrame(sensor, 200, ImageStore::FrameKind::Keyframe), large);
+  store->flush();
+  EXPECT_EQ(test::queryValue(
+                tmp.path, "SELECT rgb_path FROM frames WHERE frame_id = " + id(second)),
+            "frames/r0/200_rgb.jpg");
+}
+
 // A store left by an earlier session is moved to sessions/<k> with its scene graph
 TEST(ImageStore, RotatesEarlierSession) {
   test::TempDirectory tmp;

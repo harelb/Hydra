@@ -61,8 +61,10 @@ void declare_config(ImageStoreConfig& config) {
   field(config.write_depth, "write_depth");
   field(config.flush_period_ms, "flush_period_ms", "ms");
   field(config.max_queue_size, "max_queue_size");
+  field(config.max_queue_mb, "max_queue_mb", "MiB");
   checkInRange(config.jpeg_quality, 0, 100, "jpeg_quality");
   check(config.max_queue_size, GT, size_t(0), "max_queue_size");
+  check(config.max_queue_mb, GT, size_t(0), "max_queue_mb");
 }
 
 ImageStore::Ptr ImageStore::open(const std::filesystem::path& path) {

@@ -40,6 +40,7 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cerrno>
 #include <chrono>
@@ -212,6 +213,8 @@ struct ImageStore::Impl {
   struct Job {
     std::function<void()> files;
     std::function<void()> rows;
+    //! Image data held by the job (see reserveBytes)
+    size_t bytes = 0;
   };
 
   //! In-memory index of a frame
@@ -240,8 +243,22 @@ struct ImageStore::Impl {
     return makeId(robot_id, sequences[robot_id]++);
   }
 
-  //! Queue a job (blocks while the queue is full)
+  //! Queue a job (blocks while the queue holds max_queue_size jobs)
   void push(Job&& job);
+
+  //! Account for image data of a job that is about to be queued. Unless forced, fails
+  //! if it would exceed max_queue_mb (a job always fits when nothing is queued)
+  bool reserveBytes(size_t bytes, bool force = false) {
+    const size_t max_bytes = config.max_queue_mb << 20;
+    size_t current = queued_bytes.load();
+    do {
+      if (!force && current > 0 && current + bytes > max_bytes) {
+        return false;
+      }
+    } while (!queued_bytes.compare_exchange_weak(current, current + bytes));
+    return true;
+  }
+
   void spin();
   void runBatch(std::vector<Job>& jobs);
   void ensureDirectory(const fs::path& dir);
@@ -298,6 +315,8 @@ struct ImageStore::Impl {
   uint64_t num_committed = 0;
   bool flush_requested = false;
   bool should_shutdown = false;
+  //! Image data of the queued and running jobs (released after their batch)
+  std::atomic<size_t> queued_bytes = 0;
   std::thread writer;
 
   // only accessed by the writer thread
@@ -646,7 +665,8 @@ void ImageStore::Impl::spin() {
       queue_cv.wait(lock, [this] { return !queue.empty() || should_shutdown; });
       queue_cv.wait_until(lock, last_commit + period, [this] {
         return should_shutdown || flush_requested ||
-               queue.size() >= config.max_queue_size / 2;
+               queue.size() >= config.max_queue_size / 2 ||
+               queued_bytes.load() >= (config.max_queue_mb << 20) / 2;
       });
 
       if (queue.empty() && should_shutdown) {
@@ -662,6 +682,12 @@ void ImageStore::Impl::spin() {
     space_cv.notify_all();
     runBatch(jobs);
     last_commit = Clock::now();
+    size_t batch_bytes = 0;
+    for (const auto& job : jobs) {
+      batch_bytes += job.bytes;
+    }
+
+    queued_bytes -= batch_bytes;
     {
       std::lock_guard<std::mutex> lock(queue_mutex);
       num_committed += jobs.size();
@@ -952,8 +978,23 @@ uint64_t ImageStore::addFrame(const Frame& frame,
   bool write_depth = false;
   bool set_anchor = false;
   bool lower_kind = false;
+  bool dropped_images = false;
+  size_t image_bytes = 0;
   uint64_t frame_id;
   uint64_t sensor_seq = 0;
+  // images that don't fit into the queue are dropped (the frame is still recorded)
+  const auto admitImages = [&](bool& rgb, bool& depth_image, size_t& bytes) {
+    bytes = (rgb ? color.total() * color.elemSize() : 0) +
+            (depth_image ? depth.total() * depth.elemSize() : 0);
+    if (bytes == 0 || impl_->reserveBytes(bytes)) {
+      return true;
+    }
+
+    rgb = false;
+    depth_image = false;
+    bytes = 0;
+    return false;
+  };
   {
     std::lock_guard<std::mutex> lock(impl_->state_mutex);
     const auto sensor_iter = impl_->sensor_robots.find(frame.sensor_id);
@@ -975,6 +1016,7 @@ uint64_t ImageStore::addFrame(const Frame& frame,
       frame_id = impl_->nextId(impl_->frame_sequences, frame.robot_id);
       write_rgb = !color.empty();
       write_depth = !depth.empty();
+      dropped_images = !admitImages(write_rgb, write_depth, image_bytes);
       impl_->frames[key] = {frame_id, kind, write_rgb, write_depth, false};
       impl_->frame_keys[frame_id] = key;
       iter = impl_->frames.find(key);
@@ -982,6 +1024,7 @@ uint64_t ImageStore::addFrame(const Frame& frame,
       frame_id = iter->second.frame_id;
       write_rgb = !color.empty() && !iter->second.has_rgb;
       write_depth = !depth.empty() && !iter->second.has_depth;
+      dropped_images = !admitImages(write_rgb, write_depth, image_bytes);
       iter->second.has_rgb |= write_rgb;
       iter->second.has_depth |= write_depth;
       lower_kind = kind < iter->second.kind;
@@ -1092,6 +1135,14 @@ uint64_t ImageStore::addFrame(const Frame& frame,
     }
   };
 
+  if (dropped_images) {
+    LOG_EVERY_N(WARNING, 100) << "[ImageStore] Image queue full (max_queue_mb: "
+                              << config.max_queue_mb << "): recorded the frame @ "
+                              << frame.timestamp_ns << " [ns] without images ("
+                              << google::COUNTER << " frame(s) so far)";
+  }
+
+  job.bytes = image_bytes;
   impl_->push(std::move(job));
   return frame_id;
 }
@@ -1209,6 +1260,14 @@ std::vector<uint64_t> ImageStore::addObservations(
     }
   };
 
+  // observations keep the store consistent, so their masks are never dropped
+  for (const auto& obs : observations) {
+    if (obs.kept) {
+      job.bytes += obs.mask.total() * obs.mask.elemSize();
+    }
+  }
+
+  impl_->reserveBytes(job.bytes, true);
   impl_->push(std::move(job));
   return ids;
 }

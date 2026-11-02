@@ -90,8 +90,20 @@ struct ImageStoreConfig {
   bool write_depth = true;
   //! Maximum time [ms] queued work waits before it is committed
   size_t flush_period_ms = 500;
-  //! Maximum number of queued operations before producers block
+  //! Maximum number of queued operations before producers block. Every operation
+  //! (frames, observations, anchors, track bindings, merges) waits for space: none of
+  //! them is ever dropped by this bound
   size_t max_queue_size = 256;
+  /**
+   * Maximum image data [MiB] held by queued frames (decoded color and depth, e.g.
+   * ~4.5 MiB per 720p frame). A frame whose images do not fit is still recorded (its
+   * row, pose and anchor are kept), but without image files, and a rate-limited
+   * warning is logged: dropping images is preferred over stalling the producers (the
+   * frontend, the backend and the object extractors). A single frame is always
+   * accepted when no image data is queued. Observation masks are counted but never
+   * dropped.
+   */
+  size_t max_queue_mb = 256;
 };
 
 void declare_config(ImageStoreConfig& config);

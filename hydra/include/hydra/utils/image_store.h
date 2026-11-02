@@ -73,7 +73,9 @@ namespace hydra {
  * batched transactions. Image files are always written before the rows referencing them
  * are committed, so readers (which may open the database concurrently, it uses WAL)
  * never see a path to a missing file. Pending work is drained when the store is
- * destroyed. Producers block when the queue is full.
+ * destroyed. Producers block when the queue holds max_queue_size operations, and the
+ * images of new frames are dropped (the frames are kept) while queued frames hold
+ * max_queue_mb of image data.
  *
  * There is one instance per directory and process (see open()), so all modules of a
  * process share its connection and writer thread. Pipeline modules get the store
