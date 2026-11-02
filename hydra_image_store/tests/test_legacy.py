@@ -20,7 +20,13 @@ from hydra_image_store import (
 )
 
 A0, A1 = make_node_id("a", 0), make_node_id("a", 1)
-REAL_RUN = pathlib.Path.home() / "adt4_output/bldg45f6_full_tour_hydra_v2"
+# a real pre-store run for the smoke test (skipped when absent)
+REAL_RUN = pathlib.Path(
+    os.environ.get(
+        "HYDRA_IMAGE_STORE_LEGACY_RUN",
+        pathlib.Path.home() / "adt4_output/bldg45f6_full_tour_hydra_v2",
+    )
+)
 
 
 def _snapshot(root):
