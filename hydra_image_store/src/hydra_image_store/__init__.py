@@ -13,15 +13,38 @@ from .codec import (
     rle_encode,
     transform_to_blob,
 )
+from .indexer import index
 from .poses import JsonDsg, as_pose_lookup, load_dsg
+from .store import (
+    SCHEMA_VERSION,
+    Calib,
+    Frame,
+    FrameKind,
+    FrameKindError,
+    ImageStore,
+    ImageStoreWriter,
+    Observation,
+    SchemaVersionError,
+    schema_sql,
+)
 
 __all__ = [
     "EXTERNAL_TRACK_BASE",
+    "SCHEMA_VERSION",
+    "Calib",
+    "Frame",
+    "FrameKind",
+    "ImageStore",
+    "ImageStoreWriter",
     "JsonDsg",
+    "Observation",
+    "FrameKindError",
+    "SchemaVersionError",
     "as_pose_lookup",
     "blob_to_transform",
     "id_robot",
     "id_seq",
+    "index",
     "load_dsg",
     "make_id",
     "make_node_id",
@@ -29,5 +52,6 @@ __all__ = [
     "node_symbol",
     "rle_decode",
     "rle_encode",
+    "schema_sql",
     "transform_to_blob",
 ]
