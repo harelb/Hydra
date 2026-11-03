@@ -1,5 +1,6 @@
 """Pure-python access to the Hydra image store (see README.md)."""
 
+from .check import check_store
 from .codec import (
     EXTERNAL_TRACK_BASE,
     blob_to_transform,
@@ -42,6 +43,7 @@ __all__ = [
     "SchemaVersionError",
     "as_pose_lookup",
     "blob_to_transform",
+    "check_store",
     "id_robot",
     "id_seq",
     "index",
