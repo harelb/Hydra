@@ -238,6 +238,18 @@ def test_unknown_frame_kind_is_rejected(synthetic):
             store.info()
 
 
+def test_cli_reports_unknown_frame_kind(synthetic, capsys):
+    from hydra_image_store.cli import main
+
+    conn = sqlite3.connect(synthetic["dir"] / "store.sqlite")
+    conn.execute("UPDATE frames SET kind = 1 WHERE frame_id = ?", (synthetic["skf"],))
+    conn.commit()
+    conn.close()
+    assert main(["check", str(synthetic["dir"])]) == 2
+    err = capsys.readouterr().err
+    assert "error:" in err and "frame kind 1" in err and "Traceback" not in err
+
+
 def test_unknown_link_mode(tmp_path):
     w = ImageStore.open_writer(tmp_path / "st")
     sid = w.add_sensor("cam", 8, 6, 1, 1, 1, 1)

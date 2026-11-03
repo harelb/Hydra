@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 
-from .store import ImageStore
+from .store import FrameKindError, ImageStore, SchemaVersionError
 
 
 def _cmd_info(args) -> int:
@@ -242,7 +242,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (FrameKindError, SchemaVersionError) as err:
+        print(f"hydra-image-store: error: {err}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
