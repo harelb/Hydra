@@ -37,6 +37,10 @@ class SchemaVersionError(RuntimeError):
     pass
 
 
+class FrameKindError(ValueError):
+    """A frame row holds a kind this schema version does not define."""
+
+
 class FrameKind(enum.IntEnum):
     #: a Hydra keyframe archive, anchored to its nearest agent node
     KEYFRAME = 0
@@ -49,7 +53,7 @@ def _frame_kind(value, where) -> FrameKind:
     try:
         return FrameKind(value)
     except ValueError:
-        raise ValueError(
+        raise FrameKindError(
             f"{where}: frame kind {value!r} is not a kind of schema_version 1 "
             "(0 = keyframe, 2 = observation)"
         ) from None
