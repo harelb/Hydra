@@ -61,6 +61,7 @@ from .codec import (
     node_symbol,
     transform_to_blob,
 )
+from .events import EventLogs, events_signature, find_events_dir
 from .poses import JsonDsg
 from .store import DB_NAME, FrameKind, ImageStoreWriter, frame_stem
 
@@ -94,6 +95,8 @@ class IndexInputs:
     frontend_dsg: pathlib.Path | None = None
     bindings: pathlib.Path | None = None
     merges: pathlib.Path | None = None
+    #: live event logs (FORMAT.md §6), used when the save-time files are missing
+    events: pathlib.Path | None = None
 
     def to_json(self) -> dict:
         return {
@@ -129,6 +132,7 @@ def find_inputs(
     store=None,
     backend_dsg=None,
     frontend_dsg=None,
+    events=None,
 ) -> IndexInputs:
     """Resolve the indexer inputs. Explicit arguments win; the rest is looked up in
     ``run`` (``keyframes/``, ``tracks/``, ``hydra/{backend,frontend}``, see FORMAT.md §5).
@@ -159,6 +163,7 @@ def find_inputs(
         frontend_dsg=p(frontend_dsg) or _first_file(frontend, DSG_FILES),
         bindings=_first_file(frontend, [BINDINGS_FILE]),
         merges=_first_file(backend, [MERGES_FILE]) or _first_file(hy, [MERGES_FILE]),
+        events=p(events) or find_events_dir(run_p),
     )
 
 
@@ -276,7 +281,11 @@ def robot_prefix(robot_id: int) -> str:
     return chr(ord("a") + int(robot_id))
 
 
-def infer_robot_id(inputs: IndexInputs, agent_prefix: str | None = None) -> int:
+def infer_robot_id(
+    inputs: IndexInputs,
+    agent_prefix: str | None = None,
+    events: EventLogs | None = None,
+) -> int:
     """Robot id of a run: from ``agent_prefix``, else the ``robot_id`` the Khronos track
     logger recorded, else the one the indexer used for this store before, else from
     the only agent prefix of the frontend scene graph (a robot's frontend holds only
@@ -294,6 +303,8 @@ def infer_robot_id(inputs: IndexInputs, agent_prefix: str | None = None) -> int:
     previous = _previous_robot(inputs.store)
     if previous is not None:
         return previous
+    if events is not None and events.robot_id() is not None:
+        return events.robot_id()
     for dsg in (inputs.frontend_dsg, inputs.backend_dsg):
         if dsg is None:
             continue
@@ -439,6 +450,10 @@ class _Indexer:
         self._sensors: dict[str, int] = {}
         self.key = f"indexer.r{self.robot}."
         self.created: set[int] = set()
+        #: mtime (ns) of every raw input indexed by this pass (tail lag statistics)
+        self.source_mtimes: list[int] = []
+        #: replayed live event logs, used where a save-time file is missing
+        self.events: EventLogs | None = None
 
     # meta ---------------------------------------------------------------------------
     def meta(self, name: str, default=None):
@@ -543,14 +558,19 @@ class _Indexer:
                         self.warn(
                             "%s: metadata timestamp %d differs from name", path, ts
                         )
+                    with contextlib.suppress(OSError):
+                        self.source_mtimes.append(path.stat().st_mtime_ns)
                     sid = self.sensor_id(rec.sensor)
                     row = self._frame_row(sid, ts)
                     base = self.w.root / f"frames/r{self.robot}/{frame_stem(ts, sid)}"
+                    # an observation frame indexed before its archive (tail mode) takes
+                    # the archive's images, as when the archive is indexed first
+                    obs_row = row is not None and row[1] != FrameKind.KEYFRAME
                     rgb = depth = None
-                    if rec.color is not None and not (row and row[2]):
+                    if rec.color is not None and not (row and row[2] and not obs_row):
                         rgb = base.with_name(base.name + "_rgb.jpg")
                         write_jpeg(rgb, rec.color, self.opts["jpeg_quality"])
-                    if rec.depth is not None and not (row and row[3]):
+                    if rec.depth is not None and not (row and row[3] and not obs_row):
                         depth = base.with_name(base.name + "_depth.png")
                         write_png16(depth, depth_to_mm(rec.depth))
                     fid = self.w.add_frame_ref(
@@ -564,12 +584,17 @@ class _Indexer:
                     if rec.feature is not None:
                         self.w.set_descriptor(fid, rec.feature)
                         self.stats["descriptors_indexed"] += 1
-                    if row is not None and row[1] != FrameKind.KEYFRAME:
-                        # an observation frame indexed before its archive
+                    if obs_row:
                         self.conn.execute(
                             "UPDATE frames SET kind = ? WHERE frame_id = ?",
                             (int(FrameKind.KEYFRAME), fid),
                         )
+                        for col, new in (("rgb_path", rgb), ("depth_path", depth)):
+                            if new is not None:
+                                self.conn.execute(
+                                    f"UPDATE frames SET {col} = ? WHERE frame_id = ?",
+                                    (str(new.relative_to(self.w.root)), fid),
+                                )
                     self.created.add(fid)
                     self.stats["keyframes_indexed"] += 1
         self.set_meta("failed_keyframes", sorted(failed))
@@ -577,17 +602,42 @@ class _Indexer:
     # tracks -------------------------------------------------------------------------
     def _delete_track(self, track_id: int) -> None:
         rows = self.conn.execute(
-            "SELECT obs_id, mask_path FROM observations WHERE robot_id = ? AND track_id = ?",
+            "SELECT obs_id, mask_path, frame_id FROM observations "
+            "WHERE robot_id = ? AND track_id = ?",
             (self.robot, track_id),
         ).fetchall()
         self.conn.execute(
             "DELETE FROM observations WHERE robot_id = ? AND track_id = ?",
             (self.robot, track_id),
         )
-        for _, mask in rows:
+        for _, mask, _ in rows:
             if mask and mask.startswith("masks/"):
                 with contextlib.suppress(OSError):
                     (self.w.root / mask).unlink()
+        # observation frames only the previous log of this track used (a rewritten
+        # track.json may list other observations, or not keep the same ones): the new
+        # log recreates the frames it needs, so the store matches a one-shot index
+        for fid in sorted({r[2] for r in rows}):
+            row = self.conn.execute(
+                "SELECT kind, rgb_path, depth_path FROM frames WHERE frame_id = ?",
+                (fid,),
+            ).fetchone()
+            if row is None or row[0] != FrameKind.OBSERVATION:
+                continue
+            if self.conn.execute(
+                "SELECT 1 FROM observations WHERE frame_id = ? LIMIT 1", (fid,)
+            ).fetchone():
+                continue
+            self.conn.execute("DELETE FROM frames WHERE frame_id = ?", (fid,))
+            self.conn.execute(
+                "DELETE FROM frame_descriptors WHERE frame_id = ?", (fid,)
+            )
+            self.created.discard(fid)
+            self.stats["frames_dropped"] += 1
+            for rel in row[1:]:
+                if rel and rel.startswith("frames/"):
+                    with contextlib.suppress(OSError):
+                        (self.w.root / rel).unlink()
 
     def index_tracks(self) -> dict:
         tracks = self.meta("tracks", {})
@@ -603,6 +653,7 @@ class _Indexer:
             prev = tracks.get(d.name)
             if prev is not None and prev.get("sig") == sig:
                 continue
+            self.source_mtimes.append(sig[0])
             try:
                 data = _load_json(tj)
                 track_id = int(data["track_id"])
@@ -669,13 +720,16 @@ class _Indexer:
                     ] += 1
             tracks[d.name] = info
             self.stats["tracks_indexed"] += 1
-        self.set_meta("tracks", tracks)
+        if self.stats["tracks_indexed"] or self.meta("tracks") is None:
+            self.set_meta("tracks", tracks)
         return tracks
 
     # bindings / merges --------------------------------------------------------------
     def _load_merges(self) -> dict[int, int]:
         """Backend ``child -> final parent`` merges (merges.json)."""
         merges: dict[int, int] = {}
+        if self.inp.merges is None and self.events is not None:
+            return self.events.merges() or {}
         if self.inp.merges is not None:
             try:
                 for m in _load_json(self.inp.merges).get("merges") or []:
@@ -698,12 +752,17 @@ class _Indexer:
     def index_bindings(self, tracks: dict) -> None:
         latest: dict[int, dict] = {}
         deleted_nodes: set[int] = set()
+        data = None
         if self.inp.bindings is not None:
             try:
                 data = _load_json(self.inp.bindings)
             except (OSError, ValueError) as exc:
                 self.warn("%s: cannot read bindings: %s", self.inp.bindings, exc)
                 data = {}
+        elif self.events is not None:
+            # no track_bindings.json (Hydra still running or crashed): the live events
+            data = self.events.bindings()
+        if data is not None:
             layers = data.get("layers") or {}
             # keys are graph_updater layer names ("OBJECTS" by default): use the object
             # layer(s) when present, whatever the case, else every layer
@@ -846,18 +905,47 @@ class _Indexer:
             )
         return poses
 
-    def anchor(self, agent_source, final: bool, from_frontend: bool = False) -> None:
+    def reset_anchors(self, frame_ids) -> None:
+        """Forget the anchors of frames so that :meth:`anchor` decides them again."""
+        ids = sorted(frame_ids)
+        with self.w.batch():
+            for chunk in [ids[i : i + 900] for i in range(0, len(ids), 900)]:
+                q = ",".join("?" * len(chunk))
+                self.conn.execute(
+                    "UPDATE frames SET anchor_node_id = NULL, anchor_T_body = NULL "
+                    f"WHERE frame_id IN ({q})",
+                    chunk,
+                )
+
+    def anchor(
+        self,
+        agent_source,
+        final: bool,
+        from_frontend: bool = False,
+        provisional: bool = False,
+    ) -> None:
+        """Anchor the pending frames. With ``provisional`` (tail mode, not ``final``),
+        frames newer than the newest agent node are anchored to it for now and decided
+        again on the next call (meta ``provisional_frames``)."""
         pending = set(self.meta("pending_frames", [])) | self.created
+        previous = set(self.meta("provisional_frames", []))
+        if previous:
+            self.reset_anchors(previous)
+            pending |= previous
+            self.set_meta("provisional_frames", [])
         if not pending:
             return
         prefix = self.opts["agent_prefix"]
         if agent_source is None:
-            self.warn("no scene graph: %d frames stay unanchored for now", len(pending))
+            if not provisional:
+                self.warn(
+                    "no scene graph: %d frames stay unanchored for now", len(pending)
+                )
             self.set_meta("pending_frames", sorted(pending))
             self.stats["frames_pending"] = len(pending)
             return
         agents = load_agent_nodes(agent_source, prefix)
-        if not agents:
+        if not agents and not provisional:
             self.warn("scene graph has no agent nodes with prefix %r", prefix)
         odom = self._odom_poses(agents, from_frontend)
         stamps = np.array([a.timestamp_ns for a in agents], dtype=np.int64)
@@ -875,16 +963,24 @@ class _Indexer:
                 if anchor is None:
                     frames[fid] = (ts, blob_to_transform(odom_blob))
         decided: dict[int, tuple | None] = {}
+        later: set[int] = set()  # provisional decisions (no agent node after them yet)
         max_dist = self.opts["max_anchor_dist_m"]
         for fid, (ts, T) in frames.items():
-            if newest is None or (ts > newest and not final):
-                continue  # wait for the next agent node
+            if newest is None:
+                continue
+            if ts > newest and not final:
+                if not provisional:
+                    continue  # wait for the next agent node
+                later.add(fid)
             i = int(np.searchsorted(stamps, ts))  # neighbours: before and at/after
             cands = [j for j in (i - 1, i) if 0 <= j < stamps.size]
             best = min(cands, key=lambda j: (abs(int(stamps[j]) - ts), j))
             a = agents[best]
             W = odom[a.node_id]
             if np.linalg.norm(W[:3, 3] - T[:3, 3]) > max_dist:
+                if fid in later:
+                    later.discard(fid)  # a later agent node may still be close enough
+                    continue
                 decided[fid] = None  # too far from any agent node: stays unanchored
                 continue
             decided[fid] = (a.node_id, np.linalg.inv(W) @ T)
@@ -901,6 +997,9 @@ class _Indexer:
                 self.stats["frames_anchored"] += 1
             still = sorted(set(frames) - set(decided))
             self.set_meta("pending_frames", still)
+            if provisional and not final:
+                self.set_meta("provisional_frames", sorted(later))
+                self.stats["frames_provisional"] = len(later)
         self.stats["frames_pending"] = len(still)
 
 
@@ -913,6 +1012,7 @@ def index(
     store=None,
     dsg=None,
     frontend_dsg=None,
+    events=None,
     robot_id: int | None = None,
     agent_prefix: str | None = None,
     max_anchor_dist_m: float = 2.0,
@@ -924,7 +1024,8 @@ def index(
 
     ``run`` is the run directory (inputs looked up as in FORMAT.md §5); ``keyframes``,
     ``tracks``, ``hydra`` (Hydra's log dir with ``backend/`` and ``frontend/``),
-    ``dsg`` / ``frontend_dsg`` (scene graph files) and ``store`` (default
+    ``dsg`` / ``frontend_dsg`` (scene graph files), ``events`` (event log directory,
+    used for the save-time files that are missing) and ``store`` (default
     ``<run>/image_store``) override the lookup. ``robot_id`` namespaces ids
     (``robot << 48 | seq``) and picks the agent prefix (``a`` + robot_id unless
     ``agent_prefix`` is given); ``None`` infers it from the scene graphs (see
@@ -942,6 +1043,7 @@ def index(
         store=store,
         backend_dsg=dsg,
         frontend_dsg=frontend_dsg,
+        events=events,
     )
     with _locked(inputs.store):
         return _index(
@@ -970,8 +1072,20 @@ def _index(
     """:func:`index` for resolved inputs; the caller holds the store's index lock.
     ``signature`` (taken before reading the inputs) is recorded for
     :func:`ensure_indexed`."""
+    events = None
+    if inputs.events is not None and (
+        inputs.bindings is None
+        or inputs.merges is None
+        or (inputs.backend_dsg is None and inputs.frontend_dsg is None)
+    ):
+        # a save-time file is missing (Hydra still running, or it crashed): use the
+        # live event logs for it (FORMAT.md §6)
+        events = EventLogs(inputs.events)
+        events.poll()
+        if not events.has_events:
+            events = None
     if robot_id is None:
-        robot_id = infer_robot_id(inputs, agent_prefix)
+        robot_id = infer_robot_id(inputs, agent_prefix, events)
     opts = {
         "agent_prefix": agent_prefix
         if agent_prefix is not None
@@ -983,12 +1097,15 @@ def _index(
     writer = ImageStoreWriter(inputs.store, robot_id)
     try:
         ix = _Indexer(writer, inputs, opts)
+        ix.events = events
         ix.index_keyframes()
         track_info = ix.index_tracks()
         ix.index_bindings(track_info)
         # the backend graph's agent nodes; while it is not saved yet, the frontend's
-        # (same ids, odometric poses)
+        # (same ids, odometric poses), else the agent events
         agent_source = inputs.backend_dsg or inputs.frontend_dsg
+        if agent_source is None and events is not None:
+            agent_source = events.agents(opts["agent_prefix"]) or None
         ix.anchor(agent_source, final, from_frontend=inputs.backend_dsg is None)
         writer.set_meta("indexer_version", INDEXER_VERSION)
         if signature is not None:
@@ -1019,6 +1136,8 @@ def input_signature(inputs: IndexInputs) -> dict:
         k: sig(getattr(inputs, k))
         for k in ("backend_dsg", "frontend_dsg", "bindings", "merges")
     }
+    if inputs.events is not None:
+        out["events"] = events_signature(inputs.events)
     kf = inputs.keyframes
     if kf is not None and kf.is_dir():
         out["keyframes"] = [
@@ -1034,6 +1153,41 @@ def input_signature(inputs: IndexInputs) -> dict:
                 tracks[d.name] = s
         out["tracks"] = sorted(tracks.items())
     return json.loads(json.dumps(out))  # tuples -> lists, as read back from meta
+
+
+TAIL_KEY = "indexer.tail"
+TAIL_STALE_S = 30.0
+
+
+def tail_state(store) -> dict | None:
+    """The tailer's status record of a store (meta ``indexer.tail``, see
+    :mod:`hydra_image_store.tail`), ``None`` if it was never tailed."""
+    import sqlite3
+    import urllib.parse
+
+    db = pathlib.Path(store) / DB_NAME
+    if not db.exists():
+        return None
+    uri = "file:" + urllib.parse.quote(str(db.absolute())) + "?mode=ro"
+    try:
+        with contextlib.closing(sqlite3.connect(uri, uri=True)) as conn:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (TAIL_KEY,)
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return None if row is None else json.loads(row[0])
+
+
+def tail_active(store, stale_s: float = TAIL_STALE_S) -> bool:
+    """Whether a tailer is following this store right now (live and its heartbeat is
+    recent): :func:`ensure_indexed` then leaves the store alone."""
+    import time
+
+    state = tail_state(store)
+    if not state or not state.get("live"):
+        return False
+    return time.time() - float(state.get("heartbeat_wall", 0)) < stale_s
 
 
 def _stored_signature(store: pathlib.Path):
@@ -1076,9 +1230,13 @@ def ensure_indexed(path) -> pathlib.Path | None:
     else:
         return None
     inputs = find_inputs(run, store=store)
+    if tail_active(store):
+        return store  # a tailer keeps it up to date
     with _locked(store):
         current = input_signature(inputs)
         if is_indexed(store) and _stored_signature(store) == current:
+            return store
+        if tail_active(store):
             return store
         logger.info("indexing raw image logs of %s into %s", run, store)
         # without a saved backend graph Hydra is probably still running: keep frames
@@ -1103,4 +1261,6 @@ __all__ = [
     "is_indexed",
     "load_agent_nodes",
     "robot_prefix",
+    "tail_active",
+    "tail_state",
 ]
