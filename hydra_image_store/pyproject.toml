@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hydra_image_store"
+version = "0.2.0"
+description = "ADT4 compatibility shim: hydra_image_store -> hydra_python.image_store"
+readme = "README.md"
+license = "BSD-3-Clause"
+requires-python = ">=3.10"
+# hydra_python (pip install <hydra>/hydra) is used from the environment, else from the
+# checkout this shim sits in
+dependencies = ["numpy", "PyYAML", "imageio", "click"]
+authors = [{name = "harelb", email = "harelb@mit.edu"}]
+
+[project.scripts]
+hydra-image-store = "hydra_image_store:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
