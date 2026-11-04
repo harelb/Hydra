@@ -12,8 +12,7 @@ import zipfile
 
 import numpy as np
 import yaml
-
-from hydra_image_store import make_node_id
+from hydra_python.image_store import make_node_id
 
 cv2 = None
 
@@ -219,7 +218,7 @@ def write_track(
     """A Khronos track log as khronos' TrackLogger writes it; ``observations`` are dicts
     with ``ts``, ``T`` and ``kept`` (optional ``score``, ``bbox`` (None = empty mask),
     ``mask`` bool HxW, ``mask_rle``, ``sensor`` dict overrides)."""
-    from hydra_image_store import rle_encode
+    from hydra_python.image_store import rle_encode
 
     cv = _cv2()
     d = pathlib.Path(tracks_dir) / str(track_id)

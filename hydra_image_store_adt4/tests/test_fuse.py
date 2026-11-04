@@ -4,11 +4,10 @@ import sqlite3
 import numpy as np
 import pytest
 from conftest import BODY_T_SENSOR, make_T, rot_z, write_image
-from hydra_image_store.codec import SEQ_MASK
 from hydra_image_store_adt4.cli import main
 from hydra_image_store_adt4.fuse import FuseSource, fuse_stores, load_node_map
-
-from hydra_image_store import FrameKind, ImageStore, make_node_id
+from hydra_python.image_store import FrameKind, ImageStore, make_node_id
+from hydra_python.image_store.codec import SEQ_MASK
 
 
 def obj(index):

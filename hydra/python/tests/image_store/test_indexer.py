@@ -16,18 +16,18 @@ import os
 import pathlib
 import shutil
 
+import imageio.v3 as iio
 import numpy as np
 import pytest
-from hydra_image_store.cli import main as cli_main
-from hydra_image_store.indexer import index, is_indexed, load_agent_nodes
-
-from hydra_image_store import (
+from hydra_python.image_store import (
     EXTERNAL_TRACK_BASE,
     FrameKind,
     ImageStore,
     make_id,
     make_node_id,
 )
+from hydra_python.image_store.cli import main as cli_main
+from hydra_python.image_store.indexer import index, is_indexed, load_agent_nodes
 
 cv2 = pytest.importorskip("cv2")
 pytest.importorskip("yaml")
@@ -62,7 +62,7 @@ def frame_at(store, t):
 
 @pytest.mark.parametrize("comp", ["NO", "RLE", "ZIP", "ZIPS"])
 def test_exr_reader_matches_opencv(comp):
-    from hydra_image_store.exr import read_exr
+    from hydra_python.image_store.exr import read_exr
 
     rng = np.random.default_rng(1)
     d = (rng.random((37, 23)) * 5).astype(np.float32)
@@ -82,7 +82,7 @@ def test_exr_reader_matches_opencv(comp):
 
 
 def test_read_input_zip(tmp_path):
-    from hydra_image_store.inputdata import read_input_zip
+    from hydra_python.image_store.inputdata import read_input_zip
 
     T = R.pose(1, 2, 3, yaw=0.3)
     path = R.write_input_zip(
@@ -102,7 +102,7 @@ def test_read_input_zip(tmp_path):
 
 
 def test_depth_to_mm():
-    from hydra_image_store.inputdata import depth_to_mm
+    from hydra_python.image_store.inputdata import depth_to_mm
 
     out = depth_to_mm(np.array([[np.nan, np.inf, -1.0, 1.2344, 70.0]], np.float32))
     assert out.tolist() == [[0, 0, 0, 1234, 65535]]
@@ -166,8 +166,6 @@ def test_anchor_transforms_use_odometry(indexed):
 
 def test_keyframe_images_and_calib(indexed):
     run, _ = indexed
-    from PIL import Image
-
     with ImageStore.open(run) as store:
         (calib,) = store.sensors()  # archives and track logs share one sensor row
         assert (calib.width, calib.height, calib.fx, calib.cy) == (16, 12, R.FX, R.CY)
@@ -176,10 +174,10 @@ def test_keyframe_images_and_calib(indexed):
         kf = frame_at(store, 1.0)
         assert kf.rgb_path.name == f"{ts(1.0)}_rgb.jpg"
         assert kf.depth_path.name == f"{ts(1.0)}_depth.png"
-        rgb = np.array(Image.open(kf.rgb_path))
+        rgb = iio.imread(kf.rgb_path)
         r, _g, b = rgb[6, 8].astype(int)
         assert r > 180 and b < 40  # true colours in the file
-        depth = cv2.imread(str(kf.depth_path), cv2.IMREAD_UNCHANGED)
+        depth = iio.imread(kf.depth_path)
         assert depth.dtype == np.uint16 and depth[6, 8] == 1234 and depth[0, 0] == 0
         assert depth[0, 2] == 65535
         assert store.calib(kf.sensor_id).sensor_id >> 48 == 0
@@ -342,6 +340,19 @@ def test_failed_archive_is_skipped(run):
     stats = index(run)
     assert stats["keyframes_failed"] == 1 and stats["keyframes_indexed"] == 6
     assert stats["warnings"]
+    # not read (and warned about) again until it changes
+    stats = index(run)
+    assert stats["keyframes_failed"] == 1 and not stats.get("keyframes_indexed")
+    assert not stats.get("warnings")
+    R.write_input_zip(
+        run / "keyframes" / f"{ts(2.5)}.zip",
+        ts(2.5),
+        R.odom(2.5),
+        color=R.color_rgb(),
+        depth=R.depth_m(),
+    )
+    stats = index(run)
+    assert not stats.get("keyframes_failed") and stats["keyframes_indexed"] == 1
 
 
 def test_robot_namespacing(tmp_path):
@@ -434,7 +445,7 @@ def test_external_rows_survive_reindex(indexed):
     with ImageStore.open_writer(run, robot_id=0) as w:
         sid = w.reader().sensors()[0].sensor_id
         src = run / "external.jpg"
-        cv2.imwrite(str(src), np.zeros((12, 16, 3), np.uint8))
+        iio.imwrite(src, np.zeros((12, 16, 3), np.uint8))
         fid = w.add_frame_ref(sid, ts(9.0), kind=FrameKind.OBSERVATION, rgb=src)
         mask = np.zeros((12, 16), bool)
         mask[2:5, 2:5] = True
@@ -485,8 +496,8 @@ def test_cli_index_info_check(run, capsys):
 
 
 def test_export_indexed(indexed, tmp_path):
-    from hydra_image_store.export import export_store
-    from hydra_image_store.poses import load_dsg
+    from hydra_python.image_store.export import export_store
+    from hydra_python.image_store.poses import load_dsg
 
     run, _ = indexed
     with ImageStore.open(run) as store:
@@ -506,10 +517,11 @@ def test_load_agent_nodes_spark_graph(run):
     assert load_agent_nodes(g, "b") == []
 
 
-def test_pillow_fallback_without_opencv(tmp_path, monkeypatch):
-    from PIL import Image
-
-    from hydra_image_store import inputdata
+def test_codecs_without_opencv(tmp_path):
+    """The indexer's image codecs are imageio only: archives decode and the store's
+    JPEG / 16-bit PNG files encode with OpenCV unimportable."""
+    import subprocess
+    import sys
 
     path = R.write_input_zip(
         tmp_path / "7.zip",
@@ -518,15 +530,44 @@ def test_pillow_fallback_without_opencv(tmp_path, monkeypatch):
         color=R.color_rgb((200, 30, 10)),
         depth=R.depth_m(2.0),
     )
-    monkeypatch.setattr(inputdata, "_cv2", lambda: None)
-    rec = inputdata.read_input_zip(path)
-    assert tuple(rec.color[5, 5]) == (200, 30, 10)
-    assert rec.depth[5, 5] == pytest.approx(2.0)
-    inputdata.write_jpeg(tmp_path / "c.jpg", rec.color)
-    r, _g, b = np.array(Image.open(tmp_path / "c.jpg"))[5, 5].astype(int)
-    assert r > 180 and b < 40
-    inputdata.write_png16(tmp_path / "d.png", inputdata.depth_to_mm(rec.depth))
-    assert np.array(Image.open(tmp_path / "d.png"))[5, 5] == 2000
+    code = f"""
+import pathlib, sys
+sys.modules["cv2"] = None  # import cv2 -> ImportError
+import imageio.v3 as iio
+from hydra_python.image_store import inputdata
+rec = inputdata.read_input_zip({str(path)!r})
+assert tuple(rec.color[5, 5]) == (200, 30, 10), rec.color[5, 5]
+assert abs(rec.depth[5, 5] - 2.0) < 1e-6
+inputdata.write_jpeg(pathlib.Path({str(tmp_path / "c.jpg")!r}), rec.color)
+r, _g, b = iio.imread({str(tmp_path / "c.jpg")!r})[5, 5].astype(int)
+assert r > 180 and b < 40
+mm = inputdata.depth_to_mm(rec.depth)
+inputdata.write_png16(pathlib.Path({str(tmp_path / "d.png")!r}), mm)
+d = iio.imread({str(tmp_path / "d.png")!r})
+assert d.dtype == "uint16" and (d == mm).all() and d[5, 5] == 2000
+assert "cv2" not in {{k for k, v in sys.modules.items() if v is not None}}
+"""
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert out.returncode == 0, out.stderr
+
+
+def test_exr_fallback_reads_other_encodings(tmp_path):
+    """EXR encodings Hydra never writes (here PIZ) go through imageio's opencv plugin,
+    in OpenCV's channel order like read_exr."""
+    from hydra_python.image_store.exr import UnsupportedExr, read_exr
+    from hydra_python.image_store.inputdata import decode_exr
+
+    params = [cv2.IMWRITE_EXR_COMPRESSION, cv2.IMWRITE_EXR_COMPRESSION_PIZ]
+    depth = np.random.default_rng(0).uniform(0.1, 9, (6, 8)).astype(np.float32)
+    ok, buf = cv2.imencode(".exr", depth, params)
+    with pytest.raises(UnsupportedExr):
+        read_exr(buf.tobytes())
+    np.testing.assert_array_equal(decode_exr(buf.tobytes()), depth)
+    bgr = np.random.default_rng(1).uniform(0, 1, (6, 8, 3)).astype(np.float32)
+    ok, buf = cv2.imencode(".exr", bgr, params)
+    np.testing.assert_array_equal(decode_exr(buf.tobytes()), bgr)
 
 
 # --- reconciliation with the C++ writers (FORMAT.md "[C++ writer]") -------------------
@@ -632,7 +673,7 @@ def test_khronos_backend_layout(run):
 
 
 def test_robot_id_from_track_logs(tmp_path):
-    from hydra_image_store.indexer import find_inputs, infer_robot_id
+    from hydra_python.image_store.indexer import find_inputs, infer_robot_id
 
     run = R.build_run(tmp_path / "run", robot_prefix="c")
     shutil.rmtree(run / "hydra")  # no scene graph to infer it from
@@ -706,7 +747,7 @@ REAL = pathlib.Path(__file__).parent / "data" / "real_cpp"
 
 def test_real_cpp_artifacts(tmp_path):
     """Files written by the C++ writers' own gtests (see data/real_cpp/README)."""
-    from hydra_image_store.inputdata import read_input_zip
+    from hydra_python.image_store.inputdata import read_input_zip
 
     rec = read_input_zip(REAL / "keyframes" / "30.zip")
     assert rec.timestamp_ns == 30 and rec.world_T_body[0, 3] == pytest.approx(2.0)
@@ -728,10 +769,8 @@ def test_real_cpp_artifacts(tmp_path):
         keyframes = store.frames(kind=FrameKind.KEYFRAME)
         assert [f.timestamp_ns for f in keyframes] == [10, 30, 40]
         assert [f.anchor_node_id for f in keyframes] == [A[0], A[1], A[1]]
-        from PIL import Image
-
         kf = store.frames(kind=FrameKind.KEYFRAME)[0]
-        assert tuple(np.array(Image.open(kf.rgb_path))[1, 1]) == pytest.approx(
+        assert tuple(iio.imread(kf.rgb_path)[1, 1]) == pytest.approx(
             (10, 20, 30), abs=3
         )
         obs = store.observations(R.O1)
@@ -823,7 +862,10 @@ def test_ended_binding_of_failed_extraction_is_not_bound(run):
 
 
 def test_archive_names():
-    from hydra_image_store.indexer import archive_sensor_suffix, parse_archive_name
+    from hydra_python.image_store.indexer import (
+        archive_sensor_suffix,
+        parse_archive_name,
+    )
 
     assert parse_archive_name("123.zip") == (123, None)
     assert parse_archive_name("123_rear_cam_1.zip") == (123, "rear_cam_1")
@@ -900,7 +942,7 @@ def test_keyframe_descriptors(tmp_path, with_features):
 
 
 def test_real_cpp_multi_sensor_and_descriptors(tmp_path):
-    from hydra_image_store.inputdata import read_input_zip
+    from hydra_python.image_store.inputdata import read_input_zip
 
     rec = read_input_zip(REAL / "keyframes_features" / "10.zip")
     assert rec.feature.tolist() == [1.0, 1.0, 1.0]
@@ -920,3 +962,27 @@ def test_real_cpp_multi_sensor_and_descriptors(tmp_path):
         }
         assert at10 == {"front", "rear cam/1", "camera"}
         assert len(list(store.descriptors())) == 1
+
+
+def test_check_dsg_ignores_other_writers_bindings(indexed):
+    """Other writers (e.g. an open-vocabulary detector) bind external tracks to nodes
+    that live only in their own database (objects they created): `check --dsg` judges
+    the indexer's bindings only and counts the others separately."""
+    from hydra_python.image_store import check_store
+
+    run, _ = indexed
+    dsg = run / "hydra" / "backend" / "dsg.json"
+    assert check_store(run / "image_store", dsg=dsg)["ok"]
+    with ImageStore.open_writer(run) as w:
+        fid = w.reader().frames()[0].frame_id
+        with w.batch():
+            w.bind_track(EXTERNAL_TRACK_BASE | 5, make_node_id("O", 9999))
+            w.add_observation(EXTERNAL_TRACK_BASE | 5, fid, score=0.9, kept=True)
+    report = check_store(run / "image_store", dsg=dsg)
+    assert report["ok"], report["checks"]
+    assert report["stats"]["external_bound_nodes_not_in_dsg"] == 1
+    assert report["stats"]["bound_nodes_missing_in_dsg"] == 0
+    # an indexer binding to a node the DSG lacks still fails
+    with ImageStore.open_writer(run) as w:
+        w.bind_track(12345, make_node_id("O", 8888))
+    assert not check_store(run / "image_store", dsg=dsg)["ok"]

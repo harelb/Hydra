@@ -15,6 +15,7 @@ import urllib.parse
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from importlib import resources
 
+import imageio.v3 as iio
 import numpy as np
 
 from .codec import (
@@ -46,16 +47,15 @@ class FrameKind(enum.IntEnum):
     KEYFRAME = 0
     #: a frame only an object observation brought in (no keyframe archive)
     OBSERVATION = 2
-    # 1 is not used
 
 
 def _frame_kind(value, where) -> FrameKind:
     try:
         return FrameKind(value)
     except ValueError:
+        kinds = ", ".join(f"{k.value} = {k.name.lower()}" for k in FrameKind)
         raise FrameKindError(
-            f"{where}: frame kind {value!r} is not a kind of schema_version 1 "
-            "(0 = keyframe, 2 = observation)"
+            f"{where}: unknown frame kind {value!r} (valid: {kinds})"
         ) from None
 
 
@@ -229,7 +229,7 @@ class _Db:
 def _store_path(path: str | os.PathLike, index: bool) -> str | os.PathLike:
     """Store directory for ``path``: maps a run directory to its ``image_store/`` and,
     with ``index``, builds or refreshes the index of a run with raw image logs (see
-    :func:`hydra_image_store.indexer.ensure_indexed`)."""
+    :func:`hydra_python.image_store.indexer.ensure_indexed`)."""
     from .indexer import STORE_DIR, ensure_indexed, has_raw_inputs
 
     if index:
@@ -291,13 +291,13 @@ class ImageStore:
 
         A path may also be a run directory (its ``image_store/`` is opened). When the
         run holds raw Hydra/Khronos image logs, the store is built first with
-        :func:`hydra_image_store.indexer.index` if it was never indexed or its inputs
-        changed since (see :func:`hydra_image_store.indexer.ensure_indexed`). That
+        :func:`hydra_python.image_store.indexer.index` if it was never indexed or its inputs
+        changed since (see :func:`hydra_python.image_store.indexer.ensure_indexed`). That
         writes the store even with ``readonly=True``; ``index=False`` never writes.
 
         ``live=True`` (run directories of a run Hydra is still writing): index the run
         now and keep tailing it in a background thread until the store is closed or
-        the run is finalized (:class:`hydra_image_store.tail.Tailer`), unless another
+        the run is finalized (:class:`hydra_python.image_store.tail.Tailer`), unless another
         process already tails it."""
         if not paths:
             raise ValueError("ImageStore.open needs at least one store path")
@@ -538,7 +538,7 @@ class ImageStore:
     def frame_pose(self, frame: Frame, pose_lookup=None, *, with_source: bool = False):
         """``world_T_sensor`` of a frame.
 
-        ``pose_lookup`` is a spark_dsg graph, a :class:`~hydra_image_store.JsonDsg`, a
+        ``pose_lookup`` is a spark_dsg graph, a :class:`~hydra_python.image_store.JsonDsg`, a
         mapping or a callable ``node_id -> 4x4``. The pose is
         ``world_T_anchor @ anchor_T_body @ body_T_sensor``; when the anchor is missing or
         cannot be resolved (also after following merges) it falls back to
@@ -742,21 +742,14 @@ class ImageStore:
 
 
 def _image_shape(path) -> tuple[int, int] | None:
+    """(rows, cols) of an image file from its header; None if it does not exist."""
     if path is None or not pathlib.Path(path).exists():
         return None
-    try:
-        from PIL import Image
-    except ImportError:
-        return None
-    with Image.open(path) as im:
-        return im.height, im.width
+    return tuple(iio.improps(path).shape[:2])
 
 
 def _read_image(path) -> np.ndarray:
-    from PIL import Image  # optional dependency
-
-    with Image.open(path) as im:
-        return np.array(im)
+    return iio.imread(path)
 
 
 def _decode_descriptor(dim: int, dtype: str, data: bytes) -> np.ndarray:
@@ -789,7 +782,7 @@ def _place_file(src: pathlib.Path, dst: pathlib.Path, link: str) -> None:
 
 class ImageStoreWriter:
     """Small writer, used by the indexer and by tools that add their own rows (see
-    :data:`~hydra_image_store.codec.EXTERNAL_TRACK_BASE` for their track ids).
+    :data:`~hydra_python.image_store.codec.EXTERNAL_TRACK_BASE` for their track ids).
 
     Ids are ``(robot_id << 48) | seq``; the next sequence number is taken inside the
     insert transaction as ``max(existing seq for this robot) + 1``, so reopening a store
@@ -1046,7 +1039,7 @@ class ImageStoreWriter:
         directly); ``mask_path`` references an existing mask image, placed at
         ``masks/r<robot>/<obs_id><ext>`` like frame images. Tools other than the
         indexer use track ids from
-        :data:`~hydra_image_store.codec.EXTERNAL_TRACK_BASE` up.
+        :data:`~hydra_python.image_store.codec.EXTERNAL_TRACK_BASE` up.
         """
         with self.batch():
             if timestamp_ns is None:
@@ -1102,7 +1095,7 @@ class ImageStoreWriter:
     ) -> None:
         """Bind a track to a scene graph node (replaces its previous binding). The
         indexer recomputes the bindings of the tracks it indexes on every run; it keeps
-        those from :data:`~hydra_image_store.codec.EXTERNAL_TRACK_BASE` up."""
+        those from :data:`~hydra_python.image_store.codec.EXTERNAL_TRACK_BASE` up."""
         robot = self.robot_id if robot_id is None else int(robot_id)
         with self.batch():
             self.conn.execute(

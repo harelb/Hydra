@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hydra_image_store_adt4"
 version = "0.1.0"
-description = "ADT4 tools on top of hydra_image_store: SAM3 write-back, legacy import, fuse, store conversion"
+description = "ADT4 tools on top of hydra_python.image_store: SAM3 write-back, legacy import, fuse, store conversion"
 readme = "README.md"
 license = "BSD-3-Clause"
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ dependencies = ["hydra_image_store", "numpy"]
 authors = [{name = "harelb", email = "harelb@mit.edu"}]
 
 [project.optional-dependencies]
-test = ["pytest", "Pillow"]
+test = ["pytest"]
 
 [project.scripts]
 hydra-image-store-adt4 = "hydra_image_store_adt4.cli:main"

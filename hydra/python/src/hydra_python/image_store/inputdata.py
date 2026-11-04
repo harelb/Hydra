@@ -6,7 +6,7 @@ by ``hydra/src/input/input_data_io.cpp``:
 - ``color.png``  ``CV_8UC3`` holding **RGB** (Hydra's ``InputData::color_image``
   convention; OpenCV encodes the Mat as if it were BGR, so the PNG file itself has its
   red and blue channels swapped)
-- ``depth.exr``  ``CV_32FC1`` planar depth in metres (see :mod:`hydra_image_store.exr`)
+- ``depth.exr``  ``CV_32FC1`` planar depth in metres (see :mod:`hydra_python.image_store.exr`)
 - ``color_mask.png``, ``range.exr``, ``labels.tiff``, ``instances.tiff``,
   ``vertices.exr``, ``traversability.exr``, ``sensor_mask.png`` (ignored here)
 
@@ -26,10 +26,10 @@ by ``hydra/src/input/input_data_io.cpp``:
 from __future__ import annotations
 
 import dataclasses
-import io
 import pathlib
 import zipfile
 
+import imageio.v3 as iio
 import numpy as np
 
 from .codec import pose_matrix, quat_to_rot
@@ -105,49 +105,42 @@ def sensor_from_record(record: dict) -> SensorInfo:
     )
 
 
-def _cv2():
-    try:
-        import cv2
-
-        return cv2
-    except ImportError:
-        return None
-
-
 def decode_png(data: bytes) -> np.ndarray:
-    """Decode a PNG into the array OpenCV encoded (channel order of the original Mat)."""
-    cv2 = _cv2()
-    if cv2 is not None:
-        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
-        if img is None:
-            raise ValueError("could not decode PNG")
-        return img
-    from PIL import Image
+    """Decode an archive PNG into the array OpenCV encoded (the original Mat).
 
-    with Image.open(io.BytesIO(data)) as im:
-        img = np.array(im)
-    if img.ndim == 3 and img.shape[2] in (
-        3,
-        4,
-    ):  # file order RGB(A) -> Mat order BGR(A)
-        img = img[..., [2, 1, 0, *range(3, img.shape[2])]]
-    return img
+    OpenCV writes a 3/4-channel Mat as BGR(A), so the file's first channel is the Mat's
+    third: swap it back (Hydra's colour Mat is RGB, see the module docstring)."""
+    return _swap_rb(iio.imread(data, extension=".png"))
 
 
 def decode_exr(data: bytes) -> np.ndarray:
+    """Decode an archive EXR with :func:`read_exr`.
+
+    Hydra only writes encodings :mod:`.exr` reads (none / RLE / ZIP). Other EXR files
+    (PIZ, B44, tiled, ...) go through imageio's ``opencv`` plugin, the only imageio
+    backend that reads EXR without a separate binary download; it needs
+    ``OPENCV_IO_ENABLE_OPENEXR=1`` set before ``cv2`` is first imported."""
     try:
         return read_exr(data)
-    except UnsupportedExr:
-        cv2 = _cv2()
-        if cv2 is None:
-            raise
-        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
-        if img is None:
-            raise ValueError(
-                "OpenCV could not decode the EXR image; set OPENCV_IO_ENABLE_OPENEXR=1 "
-                "before cv2 is imported"
-            ) from None
-        return img
+    except UnsupportedExr as unsupported:
+        try:
+            # flags=-1 is cv2.IMREAD_UNCHANGED (float32, all channels)
+            img = iio.imread(data, extension=".exr", plugin="opencv", flags=-1)
+        except Exception as exc:  # noqa: BLE001 - missing cv2 / codec disabled
+            raise UnsupportedExr(
+                f"{unsupported}; imageio's opencv plugin could not read it either "
+                f"({exc}); install opencv and set OPENCV_IO_ENABLE_OPENEXR=1 before "
+                "cv2 is imported"
+            ) from exc
+        # the plugin converts to RGB(A); return OpenCV's order like read_exr
+        return _swap_rb(img)
+
+
+def _swap_rb(img: np.ndarray) -> np.ndarray:
+    """BGR(A) <-> RGB(A) for 3/4-channel images; others unchanged."""
+    if img.ndim == 3 and img.shape[2] in (3, 4):
+        img = img[..., [2, 1, 0, *range(3, img.shape[2])]]
+    return np.ascontiguousarray(img)
 
 
 def _feature(value) -> np.ndarray | None:
@@ -213,41 +206,27 @@ def depth_to_mm(depth_m: np.ndarray) -> np.ndarray:
 
 def write_jpeg(path: pathlib.Path, rgb: np.ndarray, quality: int = 90) -> None:
     """Write an RGB (or gray) array as a normal JPEG (true colours in the file)."""
-    cv2 = _cv2()
-    if cv2 is not None:
-        img = rgb
-        if rgb.ndim == 3 and rgb.shape[2] == 3:
-            img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        elif rgb.ndim == 3 and rgb.shape[2] == 4:
-            img = cv2.cvtColor(rgb, cv2.COLOR_RGBA2BGR)
-        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
-        if not ok:
-            raise ValueError("JPEG encoding failed")
-        _atomic_write(path, buf.tobytes())
-        return
-    from PIL import Image
-
-    out = io.BytesIO()
     arr = rgb[..., :3] if rgb.ndim == 3 else rgb
-    Image.fromarray(np.ascontiguousarray(arr)).save(
-        out, format="JPEG", quality=int(quality)
+    _atomic_write(
+        path,
+        iio.imwrite(
+            "<bytes>", np.ascontiguousarray(arr), extension=".jpg", quality=int(quality)
+        ),
     )
-    _atomic_write(path, out.getvalue())
 
 
 def write_png16(path: pathlib.Path, depth_mm: np.ndarray) -> None:
-    cv2 = _cv2()
-    if cv2 is not None:
-        ok, buf = cv2.imencode(".png", depth_mm)
-        if not ok:
-            raise ValueError("PNG encoding failed")
-        _atomic_write(path, buf.tobytes())
-        return
-    from PIL import Image
-
-    out = io.BytesIO()
-    Image.fromarray(depth_mm).save(out, format="PNG")
-    _atomic_write(path, out.getvalue())
+    """Write a uint16 image as a 16-bit PNG. zlib level 1 (OpenCV's default): the
+    library default (6) is ~4x slower for ~15% smaller depth images."""
+    _atomic_write(
+        path,
+        iio.imwrite(
+            "<bytes>",
+            np.ascontiguousarray(depth_mm, dtype=np.uint16),
+            extension=".png",
+            compress_level=1,
+        ),
+    )
 
 
 def _atomic_write(path: pathlib.Path, data: bytes) -> None:

@@ -4,28 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hydra_image_store"
-version = "0.1.0"
-description = "Indexer and reader for the Hydra image store"
+version = "0.2.0"
+description = "ADT4 compatibility shim: hydra_image_store -> hydra_python.image_store"
 readme = "README.md"
 license = "BSD-3-Clause"
 requires-python = ">=3.10"
-dependencies = ["numpy", "PyYAML"]
+# hydra_python (pip install <hydra>/hydra) is used from the environment, else from the
+# checkout this shim sits in
+dependencies = ["numpy", "PyYAML", "imageio", "click"]
 authors = [{name = "harelb", email = "harelb@mit.edu"}]
 
-[project.optional-dependencies]
-images = ["Pillow"]
-dsg = ["spark_dsg"]
-opencv = ["opencv-python-headless"]
-test = ["pytest", "Pillow"]
-
 [project.scripts]
-hydra-image-store = "hydra_image_store.cli:main"
+hydra-image-store = "hydra_image_store:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-hydra_image_store = ["schema.sql"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]

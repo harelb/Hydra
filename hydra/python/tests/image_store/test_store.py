@@ -13,8 +13,7 @@ from conftest import (
     rot_z,
     write_image,
 )
-
-from hydra_image_store import (
+from hydra_python.image_store import (
     EXTERNAL_TRACK_BASE,
     FrameKind,
     ImageStore,
@@ -57,14 +56,14 @@ def test_round_trip(synthetic):
         assert len(store.observations(OBJ_A, limit=1)) == 1
         assert [x.frame_id for x in store.frames_for_agent(AGENT0)] == [
             s["kf0"],
-            s["skf"],
+            s["mid"],
         ]
         assert [x.frame_id for x in store.frames_for_agent(AGENT0, 140)] == [
-            s["skf"],
+            s["mid"],
             s["kf0"],
         ]
         assert store.agent_frame(AGENT0, 100).frame_id == s["kf0"]
-        assert store.agent_frame(AGENT0, 149).frame_id == s["skf"]
+        assert store.agent_frame(AGENT0, 149).frame_id == s["mid"]
         assert store.agent_frame(AGENT0, 100 + 10**8) is None  # nothing within 50 ms
         assert store.agent_frame(AGENT1, 200).frame_id == s["kf1"]
         assert len(store.frames()) == 4
@@ -227,27 +226,27 @@ def test_external_writer(tmp_path):
 
 def test_unknown_frame_kind_is_rejected(synthetic):
     conn = sqlite3.connect(synthetic["dir"] / "store.sqlite")
-    conn.execute("UPDATE frames SET kind = 1 WHERE frame_id = ?", (synthetic["skf"],))
+    conn.execute("UPDATE frames SET kind = 7 WHERE frame_id = ?", (synthetic["mid"],))
     conn.commit()
     conn.close()
     with ImageStore.open(synthetic["dir"]) as store:
         assert store.frame(synthetic["kf0"]).kind == FrameKind.KEYFRAME
-        with pytest.raises(ValueError, match="frame kind 1"):
-            store.frame(synthetic["skf"])
-        with pytest.raises(ValueError, match="frame kind 1"):
+        with pytest.raises(ValueError, match="unknown frame kind 7"):
+            store.frame(synthetic["mid"])
+        with pytest.raises(ValueError, match="unknown frame kind 7"):
             store.info()
 
 
 def test_cli_reports_unknown_frame_kind(synthetic, capsys):
-    from hydra_image_store.cli import main
+    from hydra_python.image_store.cli import main
 
     conn = sqlite3.connect(synthetic["dir"] / "store.sqlite")
-    conn.execute("UPDATE frames SET kind = 1 WHERE frame_id = ?", (synthetic["skf"],))
+    conn.execute("UPDATE frames SET kind = 7 WHERE frame_id = ?", (synthetic["mid"],))
     conn.commit()
     conn.close()
     assert main(["check", str(synthetic["dir"])]) == 2
     err = capsys.readouterr().err
-    assert "error:" in err and "frame kind 1" in err and "Traceback" not in err
+    assert "Error:" in err and "unknown frame kind 7" in err and "Traceback" not in err
 
 
 def test_unknown_link_mode(tmp_path):
@@ -263,16 +262,16 @@ def test_pose_composition(synthetic):
     world_T_a0 = make_T(rot_z(0.7), (10, 5, 1))
     anchor_T_body = make_T(rot_z(0.1), (0.5, 0, 0))
     with ImageStore.open(s["dir"]) as store:
-        skf = store.frame(s["skf"])
+        mid = store.frame(s["mid"])
         expected = world_T_a0 @ anchor_T_body @ BODY_T_SENSOR
         np.testing.assert_allclose(
-            store.frame_pose(skf, {AGENT0: world_T_a0}), expected
+            store.frame_pose(mid, {AGENT0: world_T_a0}), expected
         )
         np.testing.assert_allclose(
-            store.frame_pose(skf, lambda n: world_T_a0 if n == AGENT0 else None),
+            store.frame_pose(mid, lambda n: world_T_a0 if n == AGENT0 else None),
             expected,
         )
-        T, src = store.frame_pose(skf, {}, with_source=True)  # anchor missing -> odom
+        T, src = store.frame_pose(mid, {}, with_source=True)  # anchor missing -> odom
         assert src == "odom"
         np.testing.assert_allclose(T, make_T(t=(1.5, 0, 0)) @ BODY_T_SENSOR)
         obs_frame = store.frame(s["obs_frame"])  # unanchored
@@ -282,7 +281,7 @@ def test_pose_composition(synthetic):
         def raising(n):
             raise KeyError(n)
 
-        assert store.frame_pose(skf, raising, with_source=True)[1] == "odom"
+        assert store.frame_pose(mid, raising, with_source=True)[1] == "odom"
         q = {"w": np.cos(0.35), "x": 0.0, "y": 0.0, "z": np.sin(0.35)}
         dsg = JsonDsg(
             {
@@ -296,7 +295,7 @@ def test_pose_composition(synthetic):
                 ]
             }
         )
-        np.testing.assert_allclose(store.frame_pose(skf, dsg), expected, atol=1e-12)
+        np.testing.assert_allclose(store.frame_pose(mid, dsg), expected, atol=1e-12)
 
 
 def test_pose_through_merged_anchor(synthetic):
@@ -318,13 +317,13 @@ def test_pose_from_spark_dsg(synthetic):
     attrs.world_R_body = spark_dsg.Quaternion(np.cos(0.35), 0.0, 0.0, np.sin(0.35))
     G.add_node(spark_dsg.DsgLayers.AGENTS, AGENT0, attrs)
     with ImageStore.open(synthetic["dir"]) as store:
-        skf = store.frame(synthetic["skf"])
+        mid = store.frame(synthetic["mid"])
         expected = (
             make_T(rot_z(0.7), (10, 5, 1))
             @ make_T(rot_z(0.1), (0.5, 0, 0))
             @ BODY_T_SENSOR
         )
-        T, src = store.frame_pose(skf, G, with_source=True)
+        T, src = store.frame_pose(mid, G, with_source=True)
         assert src == "anchor"
         np.testing.assert_allclose(T, expected, atol=1e-9)
 

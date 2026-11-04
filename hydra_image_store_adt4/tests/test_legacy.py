@@ -2,6 +2,7 @@ import json
 import os
 import pathlib
 
+import imageio.v3 as iio
 import numpy as np
 import pytest
 from conftest import BODY_T_SENSOR, make_T, rot_z, write_image
@@ -9,8 +10,7 @@ from hydra_image_store.cli import main as store_main
 from hydra_image_store_adt4.cli import main
 from hydra_image_store_adt4.legacy import LEGACY_TRACK_BASE, import_legacy
 from hydra_image_store_adt4.sam3 import sam3_track_id
-
-from hydra_image_store import (
+from hydra_python.image_store import (
     EXTERNAL_TRACK_BASE,
     FrameKind,
     ImageStore,
@@ -106,9 +106,7 @@ def legacy_run(tmp_path):
     write_image(obj / "frame_160_rgb.jpg")
     write_image(obj / "frame_160_depth.png", mode="L")
     write_image(obj / "frame_160_mask.png", mode="L", value=0)
-    from PIL import Image
-
-    Image.fromarray(mask.astype(np.uint8) * 255).save(obj / "frame_160_mask.png")
+    iio.imwrite(obj / "frame_160_mask.png", mask.astype(np.uint8) * 255)
     (obj / "frame_160_meta.json").write_text(
         json.dumps(
             {
@@ -128,7 +126,7 @@ def legacy_run(tmp_path):
 
     sam_mask = run / "sam3_masks/sam3_205_a_cup_1-1-3-3_mask.png"
     sam_mask.parent.mkdir()
-    Image.fromarray(mask.astype(np.uint8) * 255).save(sam_mask)
+    iio.imwrite(sam_mask, mask.astype(np.uint8) * 255)
     sam = run / "sam3_objects/O7"
     sam.mkdir(parents=True)
     os.symlink(run / "agents/agent_200_rgb.jpg", sam / "frame_205_rgb.jpg")
@@ -322,12 +320,7 @@ def test_import_legacy_real_run_smoke(tmp_path):
         obj0 = make_node_id("O", 0)
         (obs,) = store.observations(obj0)
         known = (
-            np.array(
-                __import__("PIL.Image", fromlist=["Image"]).open(
-                    REAL_RUN / "images/O_0/frame_1788127479836547276_mask.png"
-                )
-            )
-            > 0
+            iio.imread(REAL_RUN / "images/O_0/frame_1788127479836547276_mask.png") > 0
         )
         decoded = rle_decode(obs.mask_rle, (360, 640))
         np.testing.assert_array_equal(decoded, known)

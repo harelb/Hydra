@@ -1,6 +1,5 @@
-from hydra_image_store.cli import main
-
-from hydra_image_store import ImageStore, check_store
+from hydra_python.image_store import ImageStore, check_store
+from hydra_python.image_store.cli import main
 
 
 def test_check_store_passes_and_detects_missing_files(synthetic, capsys):

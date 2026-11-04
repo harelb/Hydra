@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import sqlite3
 
-from hydra_image_store.store import DB_NAME, _resolve_db, schema_sql
+from hydra_python.image_store.store import DB_NAME, _resolve_db, schema_sql
 
 #: the frame kind older ADT4 stores used for sub-keyframes
 SUBKEYFRAME_KIND = 1

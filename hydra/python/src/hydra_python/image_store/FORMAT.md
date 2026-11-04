@@ -1,7 +1,7 @@
 # Image log format (v1)
 
 The files Hydra and Khronos write when image logging is enabled, and that
-`hydra-image-store index` reads. All writers are off by default. Change this file first
+`hydra image-store index` reads. All writers are off by default. Change this file first
 if the format changes.
 
 Conventions:
@@ -131,7 +131,7 @@ extraction (rewritten if the track is logged again):
 ## 5. Indexer
 
 ```
-hydra-image-store index RUN [--keyframes DIR] [--tracks DIR] [--hydra DIR] [--events DIR]
+hydra image-store index RUN [--keyframes DIR] [--tracks DIR] [--hydra DIR] [--events DIR]
                         [--robot-id N]
 ```
 builds `RUN/image_store/` (`schema_version` 1, see `schema.sql`). Defaults when only `RUN`

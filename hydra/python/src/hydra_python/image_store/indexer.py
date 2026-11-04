@@ -9,7 +9,7 @@ Inputs (any may be missing):
 - the backend (and frontend) scene graph ``dsg.json``
 
 :func:`index` writes them into ``store.sqlite`` (schema_version 1) through
-:class:`~hydra_image_store.ImageStoreWriter`. It is idempotent and incremental: running
+:class:`~hydra_python.image_store.ImageStoreWriter`. It is idempotent and incremental: running
 it again only adds what is new (keyframe archives not indexed yet, ``track.json`` files
 whose size or mtime changed), recomputes track bindings and node aliases, and anchors
 the frames that are still pending (``final=False`` keeps frames after the newest agent
@@ -454,6 +454,11 @@ class _Indexer:
         self.source_mtimes: list[int] = []
         #: replayed live event logs, used where a save-time file is missing
         self.events: EventLogs | None = None
+        #: list every new frame in ``pending_frames`` in the transaction that adds it
+        #: (tail mode): concurrent readers (e.g. a store mirror) then never see a
+        #: frame without its anchor that the indexer has not marked as undecided yet
+        self.pending_on_create = False
+        self._pending: set[int] | None = None
 
     # meta ---------------------------------------------------------------------------
     def meta(self, name: str, default=None):
@@ -464,6 +469,17 @@ class _Indexer:
 
     def set_meta(self, name: str, value) -> None:
         self.w.set_meta(self.key + name, json.dumps(value, separators=(",", ":")))
+
+    def _publish_pending(self, frame_ids) -> None:
+        """Add new frames to ``pending_frames`` (call inside the batch that adds them)."""
+        if not self.pending_on_create:
+            return
+        if self._pending is None:
+            self._pending = set(self.meta("pending_frames", []))
+        new = set(frame_ids) - self._pending
+        if new:
+            self._pending |= new
+            self.set_meta("pending_frames", sorted(self._pending))
 
     def warn(self, msg: str, *args) -> None:
         text = msg % args if args else msg
@@ -521,7 +537,9 @@ class _Indexer:
             (self.robot, int(FrameKind.KEYFRAME)),
         ):
             done_by_sensor.setdefault(t, set()).add(archive_sensor_suffix(name))
-        failed = set(self.meta("failed_keyframes", []))
+        # archives that could not be read, with their (mtime, size): not read (and
+        # warned about) again until they change
+        failed = self.meta("failed_keyframes", {})
         zips = []
         for path in kf_dir.glob("*.zip"):
             parsed = parse_archive_name(path.name)
@@ -540,19 +558,37 @@ class _Indexer:
             return bool(have - suffixed.get(t, set()))
 
         zips.sort(key=lambda z: (z[0], z[1] or ""))
-        pending = [(t, p) for t, suffix, p in zips if not is_done(t, suffix)]
+
+        def unchanged_failure(path) -> bool:
+            if failed.get(path.name) is None:
+                return False
+            try:
+                return _sig(path) == failed[path.name]
+            except OSError:
+                return False
+
+        pending = [
+            (t, p)
+            for t, suffix, p in zips
+            if not is_done(t, suffix) and not unchanged_failure(p)
+        ]
+        self.stats["keyframes_failed"] += len(
+            [p for t, s, p in zips if not is_done(t, s) and unchanged_failure(p)]
+        )
         self.stats["keyframe_archives"] = len(zips)
         for i in range(0, len(pending), 50):
             with self.w.batch():
+                chunk_new: list[int] = []
                 for name_ts, path in pending[i : i + 50]:
                     try:
                         rec = read_input_zip(path)
                     except Exception as exc:  # noqa: BLE001 - corrupt / unsupported archive
                         self.warn("%s: cannot read keyframe archive: %s", path, exc)
                         self.stats["keyframes_failed"] += 1
-                        failed.add(path.name)
+                        with contextlib.suppress(OSError):
+                            failed[path.name] = _sig(path)
                         continue
-                    failed.discard(path.name)
+                    failed.pop(path.name, None)
                     ts = rec.timestamp_ns
                     if ts != name_ts:
                         self.warn(
@@ -596,8 +632,10 @@ class _Indexer:
                                     (str(new.relative_to(self.w.root)), fid),
                                 )
                     self.created.add(fid)
+                    chunk_new.append(fid)
                     self.stats["keyframes_indexed"] += 1
-        self.set_meta("failed_keyframes", sorted(failed))
+                self._publish_pending(chunk_new)
+        self.set_meta("failed_keyframes", dict(sorted(failed.items())))
 
     # tracks -------------------------------------------------------------------------
     def _delete_track(self, track_id: int) -> None:
@@ -677,6 +715,7 @@ class _Indexer:
                 self.stats["tracks_failed"] += 1
                 continue
             with self.w.batch():
+                track_new: list[int] = []
                 self._delete_track(track_id)
                 for obs, info_s, ts, kept, rle in observations:
                     sid = self.sensor_id(info_s)
@@ -702,6 +741,7 @@ class _Indexer:
                         link=link,
                     )
                     self.created.add(fid)
+                    track_new.append(fid)
                     bbox = obs["bbox_2d"]
                     self.w.add_observation(
                         track_id,
@@ -718,6 +758,7 @@ class _Indexer:
                     self.stats[
                         "observations_kept" if kept else "observations_not_kept"
                     ] += 1
+                self._publish_pending(track_new)
             tracks[d.name] = info
             self.stats["tracks_indexed"] += 1
         if self.stats["tracks_indexed"] or self.meta("tracks") is None:
@@ -926,7 +967,15 @@ class _Indexer:
     ) -> None:
         """Anchor the pending frames. With ``provisional`` (tail mode, not ``final``),
         frames newer than the newest agent node are anchored to it for now and decided
-        again on the next call (meta ``provisional_frames``)."""
+        again on the next call (meta ``provisional_frames``).
+
+        One transaction: readers never see a provisional frame reset (no anchor) but
+        not listed as pending."""
+        with self.w.batch():
+            self._anchor(agent_source, final, from_frontend, provisional)
+        self._pending = None
+
+    def _anchor(self, agent_source, final, from_frontend, provisional) -> None:
         pending = set(self.meta("pending_frames", [])) | self.created
         previous = set(self.meta("provisional_frames", []))
         if previous:
@@ -1068,8 +1117,13 @@ def _index(
     link: str = "hardlink",
     final: bool = True,
     signature: dict | None = None,
+    reanchor: set[int] | None = None,
 ) -> dict:
     """:func:`index` for resolved inputs; the caller holds the store's index lock.
+    ``reanchor`` (the tailer's final reconciliation): frames whose anchors are decided
+    again from scratch, in the same transaction that decides them; new frames are then
+    also listed as pending as they are added (concurrent readers never see a frame
+    without an anchor that is not marked pending).
     ``signature`` (taken before reading the inputs) is recorded for
     :func:`ensure_indexed`."""
     events = None
@@ -1098,6 +1152,7 @@ def _index(
     try:
         ix = _Indexer(writer, inputs, opts)
         ix.events = events
+        ix.pending_on_create = reanchor is not None
         ix.index_keyframes()
         track_info = ix.index_tracks()
         ix.index_bindings(track_info)
@@ -1106,7 +1161,16 @@ def _index(
         agent_source = inputs.backend_dsg or inputs.frontend_dsg
         if agent_source is None and events is not None:
             agent_source = events.agents(opts["agent_prefix"]) or None
-        ix.anchor(agent_source, final, from_frontend=inputs.backend_dsg is None)
+        with writer.batch():
+            if reanchor is not None:
+                # every anchor decided live is decided again, as a one-shot index would
+                ix.reset_anchors(reanchor)
+                ix.set_meta(
+                    "pending_frames",
+                    sorted(set(ix.meta("pending_frames", [])) | set(reanchor)),
+                )
+                ix.set_meta("provisional_frames", [])
+            ix.anchor(agent_source, final, from_frontend=inputs.backend_dsg is None)
         writer.set_meta("indexer_version", INDEXER_VERSION)
         if signature is not None:
             writer.set_meta(SIGNATURE_KEY, json.dumps(signature, separators=(",", ":")))
@@ -1161,7 +1225,7 @@ TAIL_STALE_S = 30.0
 
 def tail_state(store) -> dict | None:
     """The tailer's status record of a store (meta ``indexer.tail``, see
-    :mod:`hydra_image_store.tail`), ``None`` if it was never tailed."""
+    :mod:`hydra_python.image_store.tail`), ``None`` if it was never tailed."""
     import sqlite3
     import urllib.parse
 
@@ -1179,15 +1243,34 @@ def tail_state(store) -> dict | None:
     return None if row is None else json.loads(row[0])
 
 
+def _process_gone(state: dict) -> bool:
+    """The tailer that wrote ``state`` ran on this host and its process is gone."""
+    import socket
+
+    pid, host = state.get("pid"), state.get("host")
+    if pid is None or host != socket.gethostname():
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OverflowError, ValueError):
+        pass  # exists (another user), or not a pid
+    return False
+
+
 def tail_active(store, stale_s: float = TAIL_STALE_S) -> bool:
-    """Whether a tailer is following this store right now (live and its heartbeat is
-    recent): :func:`ensure_indexed` then leaves the store alone."""
+    """Whether a tailer is following this store right now (live, its heartbeat is
+    recent and, on this host, its process still exists): :func:`ensure_indexed` then
+    leaves the store alone and another tailer does not start."""
     import time
 
     state = tail_state(store)
     if not state or not state.get("live"):
         return False
-    return time.time() - float(state.get("heartbeat_wall", 0)) < stale_s
+    if time.time() - float(state.get("heartbeat_wall", 0)) >= stale_s:
+        return False
+    return not _process_gone(state)
 
 
 def _stored_signature(store: pathlib.Path):

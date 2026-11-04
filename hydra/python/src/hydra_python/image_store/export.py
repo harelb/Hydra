@@ -8,6 +8,7 @@ import pathlib
 import shutil
 from collections import Counter
 
+import imageio.v3 as iio
 import numpy as np
 
 from .codec import node_label
@@ -97,20 +98,10 @@ class _Exporter:
             ):
                 meta["mask_file"] = mask_file
             elif obs.mask_rle:
-                written = False
-                try:
-                    from PIL import Image
-
-                    m = self.store.mask(obs)
-                    if m is not None:
-                        Image.fromarray(m.astype(np.uint8) * 255).save(
-                            folder / mask_file
-                        )
-                        written = True
-                        self.stats["masks_decoded"] += 1
-                except ImportError:
-                    pass
-                if written:
+                m = self.store.mask(obs)
+                if m is not None:
+                    iio.imwrite(folder / mask_file, m.astype(np.uint8) * 255)
+                    self.stats["masks_decoded"] += 1
                     meta["mask_file"] = mask_file
                 else:
                     meta["mask_rle"] = json.loads(obs.mask_rle)

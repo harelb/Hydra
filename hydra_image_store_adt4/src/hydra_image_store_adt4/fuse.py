@@ -34,13 +34,13 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 
 import numpy as np
-from hydra_image_store.codec import (
+from hydra_python.image_store.codec import (
     SEQ_MASK,
     blob_to_transform,
     make_id,
     transform_to_blob,
 )
-from hydra_image_store.store import DB_NAME, _resolve_db, schema_sql
+from hydra_python.image_store.store import DB_NAME, _resolve_db, schema_sql
 
 from .convert import current_kind
 

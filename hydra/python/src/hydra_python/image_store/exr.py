@@ -5,8 +5,11 @@ scanline EXR (``IMWRITE_EXR_TYPE_FLOAT``) with no, RLE or ZIP compression
 (``SaveOptions::float_compression``). Reading EXR through OpenCV needs
 ``OPENCV_IO_ENABLE_OPENEXR=1`` in the environment *before* ``cv2`` is first used, which
 a library cannot guarantee (the host process may have imported cv2 already), so the
-indexer reads EXR with this module and only falls back to OpenCV for encodings it does
-not handle (PIZ, PXR24, B44, DWA, tiled or multi-part files).
+indexer reads EXR with this module. None of imageio's backends reads EXR out of the box
+either (its ``opencv`` plugin has the same restriction, ``freeimage`` needs a binary
+download), so :func:`~hydra_python.image_store.inputdata.decode_exr` only falls back to
+imageio's ``opencv`` plugin for encodings this module does not handle (PIZ, PXR24, B44,
+DWA, tiled or multi-part files), which Hydra never writes.
 """
 
 from __future__ import annotations

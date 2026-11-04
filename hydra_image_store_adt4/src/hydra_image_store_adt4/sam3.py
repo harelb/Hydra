@@ -6,7 +6,7 @@ track-id range (``EXTERNAL_TRACK_BASE`` up), which the indexer never rebinds or 
 
 from __future__ import annotations
 
-from hydra_image_store import EXTERNAL_TRACK_BASE, ImageStoreWriter
+from hydra_python.image_store import EXTERNAL_TRACK_BASE, ImageStoreWriter
 
 #: SAM3 tracks: ``SAM3_TRACK_BASE | (node_id & SAM3_NODE_MASK)``, one per node
 SAM3_TRACK_BASE = EXTERNAL_TRACK_BASE

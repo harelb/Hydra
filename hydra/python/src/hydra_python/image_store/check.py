@@ -1,11 +1,12 @@
-"""Structural consistency checks of a store (``hydra-image-store check``)."""
+"""Structural consistency checks of a store (``hydra image-store check``)."""
 
 from __future__ import annotations
 
 import os
 import pathlib
 
-from .store import DB_NAME, ImageStore, _resolve_db
+from .codec import EXTERNAL_TRACK_BASE
+from .store import DB_NAME, ImageStore, _image_shape, _resolve_db
 
 
 def resolve_store_dir(path: str | os.PathLike) -> pathlib.Path:
@@ -18,37 +19,12 @@ def resolve_store_dir(path: str | os.PathLike) -> pathlib.Path:
     return _resolve_db(p).parent
 
 
-def _image_reader():
-    """``(cv2, None)``, ``(None, PIL.Image)`` or ``None`` when neither is installed."""
-    try:
-        import cv2
-
-        return cv2, None
-    except ImportError:
-        pass
-    try:
-        from PIL import Image
-
-        return None, Image
-    except ImportError:
-        return None
-
-
-def _image_hw(path: pathlib.Path, reader) -> tuple[int, int] | None:
-    cv2, pil = reader
-    if cv2 is not None:
-        img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-        return None if img is None else img.shape[:2]
-    with pil.open(path) as im:
-        return im.height, im.width
-
-
 def check_store(store: str | os.PathLike, *, dsg=None, sample_images: int = 20) -> dict:
     """Structural consistency checks of one store (cheap).
 
     Always: schema opens; every frame's sensor exists; every observation's frame exists;
     every referenced file exists; sampled RGB/depth images have
-    the sensor's resolution (needs cv2 or Pillow, else skipped). With ``dsg`` (path or
+    the sensor's resolution. With ``dsg`` (path or
     loaded graph): keyframe anchors are DSG nodes and bound nodes are DSG nodes or merge
     children. Returns ``{"ok", "checks": {name: bool}, "stats": {...}, "store"}``.
     """
@@ -94,8 +70,7 @@ def check_store(store: str | os.PathLike, *, dsg=None, sample_images: int = 20) 
             "SELECT COUNT(*) FROM frames WHERE kind = 0 AND anchor_node_id IS NULL"
         )
         # image sizes vs calibration
-        reader = _image_reader()
-        if reader is not None and sample_images:
+        if sample_images:
             bad = []
             rows = conn.execute(
                 "SELECT f.frame_id, f.rgb_path, f.depth_path, s.width, s.height FROM frames f "
@@ -107,7 +82,7 @@ def check_store(store: str | os.PathLike, *, dsg=None, sample_images: int = 20) 
                 for rel, kind in ((rgb, "rgb"), (depth, "depth")):
                     if rel is None or not (store_dir / rel).exists():
                         continue
-                    shape = _image_hw(store_dir / rel, reader)
+                    shape = _image_shape(store_dir / rel)
                     if shape is not None and tuple(shape) != (h, w):
                         bad.append(
                             {"frame_id": fid, kind: list(shape), "calib": [h, w]}
@@ -141,12 +116,26 @@ def check_store(store: str | os.PathLike, *, dsg=None, sample_images: int = 20) 
             bad_kf = [n for n in kf_anchors if not known(n)]
             stats["keyframe_anchors_missing_in_dsg"] = len(bad_kf)
             checks["keyframe anchors exist in DSG"] = not bad_kf
+            # the indexer's (Khronos) tracks only: other writers' tracks (external ids,
+            # e.g. objects a detector created in a database) may bind nodes the DSG
+            # never had
             bound = [
                 r[0]
-                for r in conn.execute("SELECT DISTINCT node_id FROM track_bindings")
+                for r in conn.execute(
+                    "SELECT DISTINCT node_id FROM track_bindings WHERE track_id < ?",
+                    (EXTERNAL_TRACK_BASE,),
+                )
             ]
             bad_bound = [n for n in bound if not known(n)]
             stats["bound_nodes_missing_in_dsg"] = len(bad_bound)
+            stats["external_bound_nodes_not_in_dsg"] = sum(
+                1
+                for (n,) in conn.execute(
+                    "SELECT DISTINCT node_id FROM track_bindings WHERE track_id >= ?",
+                    (EXTERNAL_TRACK_BASE,),
+                )
+                if not known(n)
+            )
             checks["bound nodes exist in DSG or are merge children"] = not bad_bound
     return {
         "ok": all(checks.values()),

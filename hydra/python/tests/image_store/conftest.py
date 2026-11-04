@@ -5,12 +5,10 @@ os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
 
 import pathlib
 
+import imageio.v3 as iio
 import numpy as np
 import pytest
-
-from hydra_image_store import FrameKind, ImageStore, make_node_id
-
-PIL = pytest.importorskip("PIL.Image")
+from hydra_python.image_store import FrameKind, ImageStore, make_node_id
 
 
 def rot_z(theta):
@@ -31,11 +29,11 @@ def write_image(path, w=8, h=6, mode="RGB", value=128):
     path.parent.mkdir(parents=True, exist_ok=True)
     if mode == "I;16":
         arr = np.full((h, w), value, dtype=np.uint16)
-        PIL.fromarray(arr).save(path)
     elif mode == "L":
-        PIL.fromarray(np.full((h, w), value, dtype=np.uint8)).save(path)
+        arr = np.full((h, w), value, dtype=np.uint8)
     else:
-        PIL.fromarray(np.full((h, w, 3), value, dtype=np.uint8)).save(path)
+        arr = np.full((h, w, 3), value, dtype=np.uint8)
+    iio.imwrite(path, arr)
     return path
 
 
@@ -74,12 +72,12 @@ def synthetic(tmp_path):
         anchor_node_id=AGENT1,
         link="copy",
     )
-    skf = w.add_frame_ref(
+    mid = w.add_frame_ref(
         sid,
         150,
         kind=FrameKind.KEYFRAME,
         world_T_body_odom=make_T(t=(1.5, 0, 0)),
-        rgb=write_image(src / "skf.jpg"),
+        rgb=write_image(src / "mid.jpg"),
         anchor_node_id=AGENT0,
         anchor_T_body=make_T(rot_z(0.1), (0.5, 0, 0)),
         link="copy",
@@ -106,7 +104,7 @@ def synthetic(tmp_path):
     )
     o["a2"] = w.add_observation(10, obs_frame, mask=mask, score=0.5, kept=True)
     o["b1"] = w.add_observation(11, kf1, mask=~mask, score=0.7, kept=True)
-    o["b2"] = w.add_observation(11, skf, score=0.1)
+    o["b2"] = w.add_observation(11, mid, score=0.1)
     o["c1"] = w.add_observation(12, kf1, score=0.2)
     w.bind_track(10, OBJ_A)
     w.bind_track(11, OBJ_B)
@@ -118,7 +116,7 @@ def synthetic(tmp_path):
         "sensor": sid,
         "kf0": kf0,
         "kf1": kf1,
-        "skf": skf,
+        "mid": mid,
         "obs_frame": obs_frame,
         "obs": o,
         "mask": mask,

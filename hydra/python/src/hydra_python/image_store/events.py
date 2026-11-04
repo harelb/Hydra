@@ -88,6 +88,25 @@ class _Replay:
             self.merges.pop(int(ev["child"]), None)
 
 
+def _glued_event(raw: bytes) -> dict | None:
+    """The complete event at the end of a malformed line, if any.
+
+    A writer killed in the middle of a line leaves it unterminated; a restarted Hydra
+    appending to the same file then glues its first line (the ``open`` that starts the
+    new session) to that fragment. Losing that ``open`` would mix the two sessions'
+    events, so the last parsable ``{"ev"...}`` object of the line is recovered."""
+    start = len(raw)
+    while True:
+        start = max(raw.rfind(b'{"ev"', 0, start), raw.rfind(b'{ "ev"', 0, start))
+        if start <= 0:
+            return None
+        try:
+            ev = json.loads(raw[start:])
+        except ValueError:
+            continue
+        return ev if isinstance(ev, dict) and "ev" in ev else None
+
+
 def find_events_dir(run) -> pathlib.Path | None:
     """The events directory of a run (``events/``)."""
     if run is None:
@@ -184,8 +203,17 @@ class EventLogs:
                 ev = json.loads(raw)
             except ValueError:
                 self.bad_lines += 1
-                logger.warning("%s: skipping malformed event line %r", path, raw[:200])
-                continue
+                ev = _glued_event(raw)
+                logger.warning(
+                    "%s: skipping malformed event line %r%s",
+                    path,
+                    raw[:200],
+                    ""
+                    if ev is None
+                    else f" (recovered a {ev.get('ev')!r} event after it)",
+                )
+                if ev is None:
+                    continue
             if not isinstance(ev, dict):
                 continue
             if ev.get("ev") == "open":

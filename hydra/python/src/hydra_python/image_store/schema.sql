@@ -33,10 +33,10 @@ CREATE TABLE IF NOT EXISTS sensors (
 );
 
 -- kind: 0 = keyframe (a Hydra keyframe archive), 2 = observation frame (a frame only an
--- object observation brought in); 1 is not used. Readers reject other values. Every frame is anchored to the agent node nearest in
--- time once one is available (anchor_T_body = body pose relative to that node, from
--- odometry); until then, or when no node is close enough, anchor_node_id is NULL and
--- readers fall back to the odometric pose.
+-- object observation brought in); readers reject other values. Every frame is anchored
+-- to the agent node nearest in time once one is available (anchor_T_body = body pose
+-- relative to that node, from odometry); until then, or when no node is close enough,
+-- anchor_node_id is NULL and readers fall back to the odometric pose.
 CREATE TABLE IF NOT EXISTS frames (
   frame_id INTEGER PRIMARY KEY,
   robot_id INTEGER NOT NULL,

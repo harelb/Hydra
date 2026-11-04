@@ -2,9 +2,8 @@ import json
 
 import numpy as np
 from conftest import AGENT0, AGENT1, OBJ_A, OBJ_C, make_T, rot_z
-from hydra_image_store.cli import main
-
-from hydra_image_store import ImageStore
+from hydra_python.image_store import ImageStore
+from hydra_python.image_store.cli import main
 
 
 def _dsg_json(path):

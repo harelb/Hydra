@@ -17,7 +17,7 @@
 
 The store stays readable by other processes throughout (SQLite WAL; every pass is a few
 short transactions). Rows other writers add (tracks from
-:data:`~hydra_image_store.codec.EXTERNAL_TRACK_BASE` up, their frames) are left alone. The tailer records its state in the meta key ``indexer.tail`` (see
+:data:`~hydra_python.image_store.codec.EXTERNAL_TRACK_BASE` up, their frames) are left alone. The tailer records its state in the meta key ``indexer.tail`` (see
 :func:`indexer.tail_state`); while its heartbeat is fresh, ``ImageStore.open`` does not
 re-index the store itself.
 """
@@ -27,6 +27,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
+import socket
 import threading
 import time
 
@@ -216,6 +218,10 @@ class Tailer:
             "live": live,
             "final": not live and self.finalized,
             "heartbeat_wall": time.time(),
+            # who tails: a tailer killed hard (no "live": false written) is recognised
+            # as gone at once on this host, not only when its heartbeat gets stale
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
             "robot_id": writer.robot_id,
             "session": self.events.session(),
             "sessions": self.events.session_count(),
@@ -233,6 +239,7 @@ class Tailer:
             writer = ImageStoreWriter(self.store, robot)
             try:
                 ix = _Indexer(writer, live_inputs, opts)
+                ix.pending_on_create = True
                 ix.events = self.events if self.events.has_events else None
                 ix.index_keyframes()
                 tracks = ix.index_tracks()
@@ -281,24 +288,21 @@ class Tailer:
         """Final pass on the save-time files: equal to a one-shot ``index``."""
         logger.info("save-time files found: reconciling %s", self.store)
         signature = input_signature(inputs)
-        opts = self._opts(robot)
         with _locked(self.store):
             writer = ImageStoreWriter(self.store, robot)
             try:
-                ix = _Indexer(writer, inputs, opts)
                 owned = self._owned_frames(writer.conn, robot)
-                # every anchor decided live is decided again, as a one-shot index would
-                ix.reset_anchors(owned)
-                ix.set_meta("pending_frames", sorted(owned))
-                ix.set_meta("provisional_frames", [])
             finally:
                 writer.close()
+            # every anchor decided live is decided again, as a one-shot index would,
+            # in one transaction with the new decisions (readers never see them unset)
             stats = _index(
                 inputs,
                 robot_id=robot,
                 agent_prefix=self.agent_prefix,
                 final=True,
                 signature=signature,
+                reanchor=owned,
                 **self.index_opts,
             )
             self.finalized = True

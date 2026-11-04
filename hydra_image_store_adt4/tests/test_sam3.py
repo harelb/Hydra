@@ -5,8 +5,12 @@ from hydra_image_store_adt4.sam3 import (
     is_sam3_track,
     sam3_track_id,
 )
-
-from hydra_image_store import EXTERNAL_TRACK_BASE, ImageStore, index, make_node_id
+from hydra_python.image_store import (
+    EXTERNAL_TRACK_BASE,
+    ImageStore,
+    index,
+    make_node_id,
+)
 
 
 def test_sam3_track_ids():

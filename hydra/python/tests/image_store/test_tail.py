@@ -14,12 +14,21 @@ import time
 
 import numpy as np
 import pytest
-from hydra_image_store.cli import main as cli_main
-from hydra_image_store.events import EventLogs
-from hydra_image_store.indexer import ensure_indexed, index, tail_active, tail_state
-from hydra_image_store.tail import Tailer
-
-from hydra_image_store import EXTERNAL_TRACK_BASE, FrameKind, ImageStore, make_node_id
+from hydra_python.image_store import (
+    EXTERNAL_TRACK_BASE,
+    FrameKind,
+    ImageStore,
+    make_node_id,
+)
+from hydra_python.image_store.cli import main as cli_main
+from hydra_python.image_store.events import EventLogs
+from hydra_python.image_store.indexer import (
+    ensure_indexed,
+    index,
+    tail_active,
+    tail_state,
+)
+from hydra_python.image_store.tail import Tailer
 
 cv2 = pytest.importorskip("cv2")
 pytest.importorskip("yaml")
@@ -568,3 +577,188 @@ def test_open_live(tmp_path):
             time.sleep(0.05)
         assert store.canonical(O4) == O6
     assert not tail_active(run / "image_store")
+
+
+# --- concurrent readers / crash leftovers (bag recovery tests, 2026-11-03) -------------
+def _unmarked_unanchored(store_dir, ignore=()):
+    """Indexer-made frames a reader sees without an anchor that the indexer does not
+    list as undecided (``pending_frames`` / ``provisional_frames``)."""
+    conn = sqlite3.connect(f"file:{store_dir / 'store.sqlite'}?mode=ro", uri=True)
+    try:
+        meta = dict(conn.execute("SELECT key, value FROM meta"))
+        undecided = set(json.loads(meta.get("indexer.r0.pending_frames", "[]")))
+        undecided |= set(json.loads(meta.get("indexer.r0.provisional_frames", "[]")))
+        rows = conn.execute(
+            "SELECT frame_id, timestamp_ns FROM frames WHERE anchor_node_id IS NULL AND "
+            "(kind = ? OR frame_id IN (SELECT frame_id FROM observations WHERE track_id < ?))",
+            (int(FrameKind.KEYFRAME), EXTERNAL_TRACK_BASE),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [(fid, t) for fid, t in rows if fid not in undecided and t not in ignore]
+
+
+def test_tail_readers_never_see_undecided_frames_unmarked(tmp_path, monkeypatch):
+    """Every commit of a tail pass (live and the reconciliation) leaves each frame
+    either anchored or listed as pending / provisional. A store mirror holds the
+    frames from the lowest undecided one on; a frame committed before it was anchored
+    and not listed would be sent without its anchor (or, if it is anchored later,
+    skipped)."""
+    import contextlib
+
+    from hydra_python.image_store.store import ImageStoreWriter
+
+    run = tmp_path / "run"
+    ev, steps = live_run(run)
+    store_dir = run / "image_store"
+    far = {ts(3.9)}  # too far from every agent node: decided "no anchor"
+    seen: list = []
+    orig = ImageStoreWriter.batch
+
+    @contextlib.contextmanager
+    def checked(self):
+        with orig(self):
+            yield self
+        if self._batch_depth == 0 and (store_dir / "store.sqlite").exists():
+            seen.extend(_unmarked_unanchored(store_dir, far))
+
+    monkeypatch.setattr(ImageStoreWriter, "batch", checked)
+    tailer = Tailer(run, settle_s=0.0)
+    for step in steps:
+        step()
+        tailer.poll()
+    write_save_files(run)
+    assert tailer.poll()["final"]
+    assert seen == []
+    monkeypatch.setattr(ImageStoreWriter, "batch", orig)
+    assert dump(store_dir) == batch_reference(run, tmp_path)
+
+
+def test_event_logs_restart_after_a_cut_line(tmp_path):
+    """Hydra killed in the middle of a line, restarted appending: its ``open`` line is
+    glued to the fragment. The new session must still start there."""
+    run = tmp_path / "run"
+    ev = Events(run)
+    ev.bind(1, 30, O3)
+    ev.agent(0, 1.0)
+    ev.write("frontend", raw='{"ev": "agent", "stamp_ns": 5, "node_id": 12, "world_T')
+    ev.open("frontend")  # the restarted Hydra
+    ev.bind(5, 40, O1)
+    logs = EventLogs(run / "events")
+    logs.poll()
+    assert logs.bad_lines == 1
+    assert logs.session_count() == 2
+    assert [e["track_id"] for e in logs.bindings()["layers"]["OBJECTS"]] == [40]
+    assert logs.agents() == []
+
+
+def test_unreadable_archive_is_not_reread_until_it_changes(tmp_path, caplog):
+    run = tmp_path / "run"
+    ev, steps = live_run(run)
+    steps[0]()
+    bad = run / "keyframes" / f"{ts(1.2)}.zip"
+    good = (run / "keyframes" / f"{ts(1.0)}.zip").read_bytes()
+    bad.write_bytes(good[: len(good) // 2])  # half written (crash leftover)
+    tailer = Tailer(run, settle_s=0.0)
+    assert tailer.poll()["keyframes_failed"] == 1
+    caplog.clear()
+    stats = tailer.poll()
+    assert stats["keyframes_failed"] == 1 and not stats.get("keyframes_indexed")
+    assert "cannot read keyframe archive" not in caplog.text
+    write_archive(run, 1.2)  # replaced by a complete archive: indexed
+    assert tailer.poll()["keyframes_indexed"] == 1
+
+
+def test_tailer_killed_hard_is_not_active(tmp_path):
+    """A tailer killed with SIGKILL leaves ``live: true`` and a fresh heartbeat: a
+    restarted tailer must not wait for the heartbeat to get stale (30 s) on this host."""
+    import os
+    import subprocess
+    import sys
+
+    run = tmp_path / "run"
+    ev, steps = live_run(run)
+    steps[0]()
+    code = (
+        "import sys; from hydra_python.image_store.tail import Tailer; "
+        "Tailer(sys.argv[1], settle_s=0.0).poll()"
+    )
+    subprocess.run([sys.executable, "-c", code, str(run)], check=True, env=os.environ)
+    state = tail_state(run / "image_store")
+    assert state["live"] and state["pid"] != os.getpid()
+    assert not tail_active(run / "image_store")  # its process is gone
+    tailer = Tailer(run, settle_s=0.0)
+    tailer.poll()
+    assert tail_active(run / "image_store")  # this process tails now
+
+
+def test_cli_tail_refuses_a_second_tailer(tmp_path, capsys):
+    run = tmp_path / "run"
+    ev, steps = live_run(run)
+    steps[0]()
+    Tailer(run, settle_s=0.0).poll()  # live, this process
+    assert cli_main(["tail", str(run), "--once"]) == 0
+    assert "another tailer follows" in capsys.readouterr().out
+    assert tail_state(run / "image_store")["polls"] == 0  # untouched
+
+
+def _undecided_unlisted(store_dir):
+    """Timestamps of frames a reader would take as settled although they have no anchor:
+    unanchored and not in any ``pending_frames`` / ``provisional_frames`` list."""
+    conn = sqlite3.connect(f"file:{store_dir / 'store.sqlite'}?mode=ro", uri=True)
+    try:
+        listed = set()
+        for (value,) in conn.execute(
+            "SELECT value FROM meta WHERE key LIKE 'indexer.r%.pending_frames' "
+            "OR key LIKE 'indexer.r%.provisional_frames'"
+        ):
+            listed |= set(json.loads(value))
+        return {
+            t
+            for fid, t in conn.execute(
+                "SELECT frame_id, timestamp_ns FROM frames WHERE anchor_node_id IS NULL"
+            )
+            if fid not in listed
+        }
+    finally:
+        conn.close()
+
+
+def test_readers_never_see_undecided_frames_as_settled_through_reconciliation(
+    tmp_path, monkeypatch
+):
+    """After every committed transaction of the tailer, a frame without an anchor is
+    either listed as pending / provisional or stays unanchored for good (too far from
+    any agent node, another writer's frame): readers such as a store mirror send every
+    unlisted frame below the lowest listed one as settled. Checked at the two windows
+    where a frame could otherwise be visible unlisted: between its creation and the
+    anchoring pass, and between the reset of the live anchors and the pending list of
+    the final reconciliation."""
+    import contextlib
+
+    from hydra_python.image_store.store import ImageStoreWriter
+
+    run = tmp_path / "run"
+    store_dir = run / "image_store"
+    seen: set[int] = set()
+    orig = ImageStoreWriter.batch
+
+    @contextlib.contextmanager
+    def checked(self):
+        top = self._batch_depth == 0
+        with orig(self):
+            yield self
+        if top and (store_dir / "store.sqlite").exists():
+            seen.update(_undecided_unlisted(store_dir))
+
+    monkeypatch.setattr(ImageStoreWriter, "batch", checked)
+    ev, steps = live_run(run)
+    tailer = Tailer(run, settle_s=0.0)
+    for step in steps:
+        step()
+        tailer.poll()
+    write_save_files(run)
+    assert tailer.poll()["final"]
+    final_unanchored = _undecided_unlisted(store_dir)
+    assert seen, "the hook saw no transaction"
+    assert seen <= final_unanchored, sorted(seen - final_unanchored)

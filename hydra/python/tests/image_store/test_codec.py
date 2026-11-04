@@ -2,8 +2,7 @@ import struct
 
 import numpy as np
 import pytest
-
-from hydra_image_store import (
+from hydra_python.image_store import (
     blob_to_transform,
     id_robot,
     id_seq,

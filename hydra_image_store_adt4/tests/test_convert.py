@@ -4,8 +4,7 @@ import pytest
 from conftest import write_image
 from hydra_image_store_adt4.cli import main
 from hydra_image_store_adt4.convert import convert_store
-
-from hydra_image_store import FrameKind, ImageStore, make_node_id
+from hydra_python.image_store import FrameKind, ImageStore, make_node_id
 
 A0 = make_node_id("a", 0)
 
@@ -54,3 +53,16 @@ def test_convert_dry_run_and_run_dir(tmp_path):
     assert main(["convert", str(tmp_path / "run")]) == 0
     assert kinds(tmp_path / "run/image_store")[150] == 0
     assert main(["convert", str(tmp_path / "nope")]) == 1
+
+
+def test_shim_cli_refuses_unconverted_store_with_hint(tmp_path, capsys):
+    import hydra_image_store
+
+    root = old_store(tmp_path / "st")
+    assert hydra_image_store.main(["check", str(root)]) == 2
+    err = capsys.readouterr().err
+    assert "frame kind 1" in err and "hydra-image-store-adt4 convert" in err
+    assert "Traceback" not in err
+    assert kinds(root) == {100: 0, 150: 1, 160: 2}  # nothing written
+    convert_store(root)
+    assert hydra_image_store.main(["check", str(root)]) == 0

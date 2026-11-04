@@ -1,9 +1,9 @@
 import pathlib
 
+import imageio.v3 as iio
 import numpy as np
-import pytest
 
-PIL = pytest.importorskip("PIL.Image")
+import hydra_image_store  # noqa: F401 - ADT4 shim: puts hydra_python on sys.path
 
 
 def rot_z(theta):
@@ -23,11 +23,12 @@ def write_image(path, w=8, h=6, mode="RGB", value=128):
     path = pathlib.Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if mode == "I;16":
-        PIL.fromarray(np.full((h, w), value, dtype=np.uint16)).save(path)
+        arr = np.full((h, w), value, dtype=np.uint16)
     elif mode == "L":
-        PIL.fromarray(np.full((h, w), value, dtype=np.uint8)).save(path)
+        arr = np.full((h, w), value, dtype=np.uint8)
     else:
-        PIL.fromarray(np.full((h, w, 3), value, dtype=np.uint8)).save(path)
+        arr = np.full((h, w, 3), value, dtype=np.uint8)
+    iio.imwrite(path, arr)
     return path
 
 
